@@ -1,0 +1,228 @@
+{
+ "name": "Default",
+ "colorset": {
+  "back_start": {
+   "rgb": [
+    62,
+    61,
+    50
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "back_end": {
+   "rgb": [
+    39,
+    40,
+    34
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "attackbox": {
+   "rgb": [
+    239,
+    68,
+    68
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "collisionbox": {
+   "rgb": [
+    59,
+    130,
+    246
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "sound_wave": {
+   "rgb": [
+    230,
+    219,
+    116
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "block_range": {
+   "rgb": [
+    47,
+    48,
+    42
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "line": {
+   "rgb": [
+    62,
+    61,
+    50
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "paren": {
+   "rgb": [
+    253,
+    151,
+    31
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "paren_range": {
+   "rgb": [
+    47,
+    48,
+    42
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "comment": {
+   "rgb": [
+    117,
+    113,
+    94
+   ],
+   "bold": false,
+   "italic": true
+  },
+  "block": {
+   "rgb": [
+    166,
+    226,
+    46
+   ],
+   "bold": true,
+   "italic": false
+  },
+  "number": {
+   "rgb": [
+    174,
+    129,
+    255
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "string": {
+   "rgb": [
+    230,
+    219,
+    116
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "keyword": {
+   "rgb": [
+    102,
+    217,
+    239
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "keyword_value": {
+   "rgb": [
+    174,
+    129,
+    255
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "block_type": {
+   "rgb": [
+    102,
+    217,
+    239
+   ],
+   "bold": true,
+   "italic": false
+  },
+  "function": {
+   "rgb": [
+    166,
+    226,
+    46
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "const": {
+   "rgb": [
+    253,
+    151,
+    31
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "background": {
+   "rgb": [
+    39,
+    40,
+    34
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "foreground": {
+   "rgb": [
+    248,
+    248,
+    242
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "key_trigger": {
+   "rgb": [
+    249,
+    38,
+    114
+   ],
+   "bold": true,
+   "italic": false
+  },
+  "operator": {
+   "rgb": [
+    249,
+    38,
+    114
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "label": {
+   "rgb": [
+    207,
+    207,
+    194
+   ],
+   "bold": false,
+   "italic": true
+  }
+ },
+ "ui": {
+  "window": "#1e1f1a",
+  "panel": "#272822",
+  "panel_alt": "#34352d",
+  "input": "#22231e",
+  "text": "#f8f8f2",
+  "text_dim": "#a59f85",
+  "border": "#3a3b33",
+  "accent": "#a6e22e",
+  "accent_soft": "#2f3a1c",
+  "selection": "#49483e",
+  "button": "#272822",
+  "button_hover": "#49483e",
+  "icon": "#cfcfc2",
+  "accent_text": "#1e1f1a"
+ }
+}

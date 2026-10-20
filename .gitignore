@@ -1,0 +1,21 @@
+# environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+*.bak
+
+# generated executable (tools/build_exe.py)
+build/
+dist/
+
+# local tool settings
+.claude/
+.vscode/
+.idea/
+
+# test and build leftovers
+.coverage
+htmlcov/
+*.spec

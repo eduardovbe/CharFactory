@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an idea or an improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do
+      description: The task you are trying to get done and what makes it hard today.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: How it could work
+      description: How you imagine it in the interface or in the command line.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds you use today or other tools that already do it.

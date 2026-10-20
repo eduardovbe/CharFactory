@@ -1,0 +1,32 @@
+# On a v* tag (e.g. v1.0.0), builds Char Factory.exe and attaches the zip to the Release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]" pyinstaller
+      - name: Build the executable
+        run: python tools/build_exe.py
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist/Char Factory" -DestinationPath "Char-Factory-${{ github.ref_name }}-windows.zip"
+      - name: Publish to the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Char-Factory-${{ github.ref_name }}-windows.zip
+          generate_release_notes: true

@@ -1,0 +1,228 @@
+{
+ "name": "Midnight",
+ "colorset": {
+  "back_start": {
+   "rgb": [
+    30,
+    41,
+    59
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "back_end": {
+   "rgb": [
+    15,
+    23,
+    42
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "attackbox": {
+   "rgb": [
+    239,
+    68,
+    68
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "collisionbox": {
+   "rgb": [
+    59,
+    130,
+    246
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "sound_wave": {
+   "rgb": [
+    56,
+    189,
+    248
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "block_range": {
+   "rgb": [
+    15,
+    23,
+    41
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "line": {
+   "rgb": [
+    17,
+    26,
+    46
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "paren": {
+   "rgb": [
+    244,
+    114,
+    182
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "paren_range": {
+   "rgb": [
+    15,
+    23,
+    41
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "comment": {
+   "rgb": [
+    112,
+    128,
+    149
+   ],
+   "bold": false,
+   "italic": true
+  },
+  "block": {
+   "rgb": [
+    125,
+    211,
+    252
+   ],
+   "bold": true,
+   "italic": false
+  },
+  "number": {
+   "rgb": [
+    253,
+    164,
+    175
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "string": {
+   "rgb": [
+    167,
+    243,
+    208
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "keyword": {
+   "rgb": [
+    147,
+    197,
+    253
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "keyword_value": {
+   "rgb": [
+    196,
+    181,
+    253
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "block_type": {
+   "rgb": [
+    252,
+    211,
+    77
+   ],
+   "bold": true,
+   "italic": false
+  },
+  "function": {
+   "rgb": [
+    94,
+    234,
+    212
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "const": {
+   "rgb": [
+    253,
+    186,
+    116
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "background": {
+   "rgb": [
+    11,
+    17,
+    32
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "foreground": {
+   "rgb": [
+    203,
+    213,
+    225
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "key_trigger": {
+   "rgb": [
+    240,
+    171,
+    252
+   ],
+   "bold": true,
+   "italic": false
+  },
+  "operator": {
+   "rgb": [
+    148,
+    163,
+    184
+   ],
+   "bold": false,
+   "italic": false
+  },
+  "label": {
+   "rgb": [
+    148,
+    163,
+    184
+   ],
+   "bold": false,
+   "italic": true
+  }
+ },
+ "ui": {
+  "window": "#020617",
+  "panel": "#0f172a",
+  "panel_alt": "#1e293b",
+  "input": "#0b1120",
+  "text": "#e2e8f0",
+  "text_dim": "#94a3b8",
+  "border": "#1e293b",
+  "accent": "#38bdf8",
+  "accent_soft": "#082f49",
+  "selection": "#0c4a6e",
+  "button": "#0f172a",
+  "button_hover": "#334155",
+  "icon": "#94a3b8",
+  "accent_text": "#082f49"
+ }
+}
