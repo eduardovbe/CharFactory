@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "dist/Char Factory" -DestinationPath "Char-Factory-${{ github.ref_name }}-windows.zip"
       - name: Publish to the Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: Char-Factory-${{ github.ref_name }}-windows.zip
           generate_release_notes: true
