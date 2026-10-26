@@ -200,12 +200,11 @@ def resize_canvas(arr: np.ndarray, left: int, top: int, right: int, bottom: int)
 
 def nearest_indices(rgba: np.ndarray, colors: list[tuple[int, int, int]]) -> np.ndarray:
     """Imagem RGBA nos índices da paleta mais próximos (o 0 fica para o transparente)."""
+    from ..tools.ops import _nearest_indices
     h, w = rgba.shape[:2]
-    pal = np.array([c[:3] for c in colors[1:256]], np.int32)
-    px = rgba[..., :3].reshape(-1, 3).astype(np.int32)
-    uniq, inv = np.unique(px, axis=0, return_inverse=True)
-    d = ((uniq[:, None, :] - pal[None, :, :]) ** 2).sum(axis=2)
-    out = (d.argmin(axis=1) + 1)[inv.reshape(-1)].reshape(h, w).astype(np.uint8)
+    # em blocos e só nas cores distintas: a matriz cores x paleta inteira de uma foto grande
+    # passava de 4 GB e travava o editor
+    out = _nearest_indices(rgba[..., :3], [tuple(c[:3]) for c in colors[:256]]).reshape(h, w)
     out[rgba[..., 3] < 128] = 0
     return out
 
@@ -1248,9 +1247,11 @@ class ImageEditor(QDialog):
             self.swatches.used = {int(v) for v in np.unique(arr)}
         else:
             a = arr.reshape(-1, 4)
-            uniq, counts = np.unique(a[a[:, 3] > 0], axis=0, return_counts=True)
-            order = np.argsort(-counts)[:126]
-            vals = [(0, 0, 0, 0)] + [tuple(int(c) for c in uniq[i]) for i in order]
+            a = a[a[:, 3] > 0].astype(np.uint64)
+            codes = (a[:, 0] << 24) | (a[:, 1] << 16) | (a[:, 2] << 8) | a[:, 3]
+            uniq, counts = np.unique(codes, return_counts=True)     # 1D: rápido até em foto grande
+            order = np.argsort(-counts, kind="stable")[:126]
+            vals = [(0, 0, 0, 0)] + [tuple(int(uniq[i] >> s & 255) for s in (24, 16, 8, 0)) for i in order]
             for v in (self.canvas.primary, self.canvas.secondary):
                 if v not in vals:
                     vals.append(v)

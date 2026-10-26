@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--template"); s.add_argument("--author", default="")
     s = sub.add_parser("run"); s.add_argument("char"); s.add_argument("--p2"); s.add_argument("--stage")
     s.add_argument("--engine", choices=runner.ENGINES, default="auto")
+    s.add_argument("--profile", help="run profile saved in the app (Debug > Run profiles)")
     s = sub.add_parser("extract"); s.add_argument("archive"); s.add_argument("--dest")
     s.add_argument("--overwrite", action="store_true")
     s = sub.add_parser("pack"); s.add_argument("char"); s.add_argument("out")
@@ -122,7 +123,16 @@ def main(argv: list[str] | None = None) -> int:
                              scale=a.scale).save(a.out)
         print(f"{a.out}  (pos = {a.x}, {a.y})")
     elif a.cmd == "run":
-        show(runner.run(c, a.p2, a.stage, engine=a.engine))
+        if a.profile:
+            gs = runner.gui_settings()
+            prof = next((p for p in runner.load_profiles(gs) if p.name.lower() == a.profile.lower()), None)
+            if prof is None:
+                raise SystemExit(tr("profile {0} not found; saved: {1}").format(
+                    a.profile, ", ".join(p.name for p in runner.load_profiles(gs))))
+            show(runner.run(c, a.p2, a.stage, engine=a.engine, profile=prof,
+                            mugen_root=gs.get("mugen_dir") or None, ikemen_root=gs.get("ikemen_dir") or None))
+        else:
+            show(runner.run(c, a.p2, a.stage, engine=a.engine))
     elif a.cmd == "sim":
         _sim(c, a)
     elif a.cmd == "view":

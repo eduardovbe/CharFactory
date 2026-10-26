@@ -169,6 +169,7 @@ class AppContext(QObject):
     request_code = Signal(str, str)     # arquivo, local ("[Begin Action 200]")
     request_tool = Signal(str)          # "palfx", "throw", "var_list"…
     request_validate = Signal()
+    ask_ai = Signal(str)                # abre o assistente e manda o pedido (do simulador, etc.)
     request_definition = Signal(str, int, int)  # 'anim'|'state'|'sound', a, b (ir para a definição)
     cursor_info = Signal(int, int, int, str)  # linha, coluna, total de linhas, encoding
 

@@ -501,6 +501,10 @@ def test_states_tree_modes_and_anim_preview(gui):
     assert page.preview.number is None             # fechada: não desenha
     page.preview_section.head.setChecked(True)     # abrir mostra a ação do estado do cursor
     page.preview._load()
+    import time
+    t = time.perf_counter()
+    while page.preview.loading and time.perf_counter() - t < 30:   # desenha fora da interface
+        app.processEvents()
     assert page.preview.number == 200 and page.preview.frames
     assert "200" in page.crumb.text()
 
@@ -1536,3 +1540,63 @@ def test_find_searches_only_the_open_tab(gui, monkeypatch):
     n = len(seen)
     win.find_text()
     assert len(seen) == n
+
+
+def test_run_profiles_dialog_edits_previews_and_runs(gui, monkeypatch):
+    """Perfis: um modelo novo entra na lista, a linha de comando acompanha o que se edita, o que
+    o MUGEN não aceita fica de fora e Salvar e rodar roda com o perfil escolhido."""
+    from charfactory.gui.runprofiles import RunProfilesDialog, presets
+    app, ctx, win, work = gui
+    ctx.settings["mugen_dir"] = str(work.parents[1])
+    dlg = RunProfilesDialog(ctx, win)
+    label, values = presets()[1]                           # testar supers
+    dlg.add(label, values)
+    assert dlg.current().name == label and dlg.max_power.isChecked()
+    dlg.side[2]["life"].setValue(500)
+    assert "-p2.life 500" in dlg.preview.text()
+    dlg.engine.setCurrentIndex(dlg.engine.findData("mugen"))
+    assert "-maxpowermode" not in dlg.preview.text() and "Ikemen GO only" in dlg.warn.text()
+    ran = []
+    monkeypatch.setattr(win, "run_mugen", lambda engine=None, profile=None: ran.append(profile))
+    dlg.run_requested.connect(lambda prof: win.run_mugen(profile=prof))
+    dlg._run()
+    assert ran and ran[0].name == label and ran[0].p2_life == 500
+    assert ctx.settings["run_profile"] == label and len(ctx.settings["run_profiles"]) == 2
+
+
+def test_import_dialog_embedded_palette_and_big_image(gui, tmp_path):
+    """Imagem indexada: a paleta embutida vem marcada como recomendada; imagem grande sugere
+    reduzir, a prévia usa uma cópia menor e a importação não trava a janela."""
+    import time
+
+    import numpy as np
+    from PIL import Image
+
+    from charfactory.gui.spriteimport import ImportSpritesDialog
+    app, ctx, win, _ = gui
+    a = np.zeros((40, 30), np.uint8)
+    a[5:35, 5:25] = 9
+    im = Image.fromarray(a, "P")
+    im.putpalette([0, 0, 0] + [200, 10, 10] * 255)
+    p = tmp_path / "idx.png"
+    im.save(p)
+    dlg = ImportSpritesDialog(ctx, [str(p)], 7300, 0)
+    assert dlg.mode_name() == "embedded" and "recommended" in dlg.r_emb.text().lower()
+    dlg.do_import()
+    spr = ctx.char.sprites.find(7300, 0)
+    assert spr is not None and ctx.char.sprites.palettes[spr.palette_index].colors[9] == (200, 10, 10)
+    big = tmp_path / "big.png"
+    rgb = np.random.default_rng(0).integers(0, 256, (2400, 1600, 3), dtype=np.uint8)
+    Image.fromarray(rgb, "RGB").save(big)
+    t = time.perf_counter()
+    dlg = ImportSpritesDialog(ctx, [str(big)], 7301, 0)
+    assert time.perf_counter() - t < 20
+    assert dlg.scale.value() < 100 and not dlg.size_note.isHidden()      # já sugere a altura do char
+    dlg.scale.setValue(100)
+    assert not dlg.reduced.isHidden()
+    dlg.r_true.setChecked(True)
+    dlg.do_import()
+    while dlg.result is None and time.perf_counter() - t < 60:
+        app.processEvents()
+    assert ctx.char.sprites.find(7301, 0) is not None
+    ctx.char.dirty.clear()

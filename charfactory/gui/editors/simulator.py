@@ -55,12 +55,13 @@ class Job(QRunnable):
             self.finished = True
 
 
-def start(job: Job, owner: QObject) -> None:
+def start(job: Job, owner: QObject, priority: int = 0) -> None:
     # mantém vivo até terminar (só some da lista depois de rodar). O resultado deve ir para
     # métodos de um QObject: assim chega pela fila da interface; uma lambda solta rodaria na
-    # thread do trabalho
+    # thread do trabalho. Prioridade maior passa na frente na fila (desenhar o tick que a pessoa
+    # está vendo vem antes de auditar os efeitos)
     owner._jobs = [j for j in getattr(owner, "_jobs", []) if not j.finished] + [job]
-    _pool().start(job)
+    _pool().start(job, priority)
 
 
 _POOL: QThreadPool | None = None
@@ -369,6 +370,12 @@ class TickView(QLabel):
         self._pix = QPixmap.fromImage(pil_to_qimage(img)) if img is not None else None
         self._fit()
 
+    def set_message(self, title: str, text: str = "") -> None:
+        """Sem imagem, com um aviso no meio (desenhando, falhou, sem simulação)."""
+        self.placeholder = (title, text)
+        self._pix = None
+        self._fit()
+
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         self._fit()
@@ -419,6 +426,8 @@ class SimulatorPage(QWidget):
         self._gen = 0
         self._rendering = False
         self._want: tuple | None = None
+        self._audit_item: QListWidgetItem | None = None
+        self._failed: dict[tuple, str] = {}     # ticks que não desenharam (não tenta de novo)
 
         self.state = QComboBox()
         self.state.setEditable(True)
@@ -493,7 +502,11 @@ class SimulatorPage(QWidget):
         view = Section(tr("Display"), "sim.view")
         view.add(form_row(tr("Zoom"), self.zoom), self.boxes, self.p2, self.sound, self.player)
         events = Section(tr("Events and problems"), "sim.events")
-        events.add(hint_label(tr("Click an event to go to its tick.")), self.events)
+        self.ask_btn = QPushButton(icon("ai"), tr("Ask the AI to fix this move"))
+        self.ask_btn.setToolTip(tr("Opens the assistant with the frame data and the problems of this simulation"))
+        self.ask_btn.clicked.connect(self.ask_ai)
+        self.ask_btn.setEnabled(False)
+        events.add(hint_label(tr("Click an event to go to its tick.")), self.events, self.ask_btn)
         self.events.setMinimumHeight(180)
         content = QWidget()
         lv = QVBoxLayout(content)
@@ -588,10 +601,13 @@ class SimulatorPage(QWidget):
         self._drop_pending_render()
         self.play_action.setChecked(False)
         self._set_player(False)
+        self.ask_btn.setEnabled(False)
         self.run_btn.setEnabled(True)
         self.cache.clear()
+        self._failed.clear()
+        self._audit_item = None
         self.events.clear()
-        self.view.set_image(None)
+        self.view.set_message(*TickView.placeholder)
         self.timeline.set_data(None)
         self.fd_label.setText("")
         self.sim_b = None
@@ -708,8 +724,8 @@ class SimulatorPage(QWidget):
         self.info.setText(tr("Simulating state {0}…").format(n))
 
         def work():
-            # a auditoria (summary) mede efeitos sprite a sprite: segundos num golpe cheio de
-            # faíscas, por isso vai junto da simulação e não na thread da interface
+            # a auditoria dos efeitos vem depois, num trabalho à parte: o primeiro tick aparece
+            # sem esperar a medida sprite a sprite das faíscas
             sim = simulate.simulate(c, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
                                     chain=chain, from_ground=simulate.starts_on_ground(c, n))
             box = simulate._window(sim) if sim.track else None
@@ -722,7 +738,7 @@ class SimulatorPage(QWidget):
                 if simb.track and box:
                     bb = simulate._window(simb)
                     box = (min(box[0], bb[0]), max(box[1], bb[1]), min(box[2], bb[2]), max(box[3], bb[3]))
-            return gen, sim, simulate.summary(sim), box, simb
+            return gen, sim, box, simb
 
         job = Job(work)
         job.signals.done.connect(self.on_done)
@@ -734,13 +750,14 @@ class SimulatorPage(QWidget):
         self.info.setText(tr("The simulation failed:\n") + msg)
 
     def on_done(self, result) -> None:
-        gen, sim, summ, box, *rest = result
+        gen, sim, box, simb = result
         if gen != self._gen:
             return          # outra simulação foi pedida depois desta
-        self.sim_b = rest[0] if rest else None
+        self.sim_b = simb
         self.run_btn.setEnabled(True)
         self.sim = sim
         self.cache.clear()
+        self._failed.clear()
         self._want = None
         self.view_box = box
         self.slider.blockSignals(True)
@@ -751,11 +768,13 @@ class SimulatorPage(QWidget):
         self.slider.blockSignals(False)
         self.slider.setEnabled(bool(sim.track))
         self._set_player(bool(sim.track))
+        self.ask_btn.setEnabled(True)
         guards = sum(1 for e in sim.events if e["kind"] == "defesa")
-        self.info.setText(tr("{0} ticks · {1} hit(s)").format(summ['ticks'], summ['hits'])
+        hits = sum(1 for e in sim.events if e["kind"] == "acerto")
+        self.info.setText(tr("{0} ticks · {1} hit(s)").format(sim.tick, hits)
                           + (tr(" · {0} guard(s)").format(guards) if guards else "")
-                          + (tr(" · not simulated: {0}").format(', '.join(sorted(set(map(str, summ['unsupported']))))[:120])
-                             if summ["unsupported"] else ""))
+                          + (tr(" · not simulated: {0}").format(', '.join(sorted(set(map(str, sim.unsupported))))[:120])
+                             if sim.unsupported else ""))
         from ...tools import movetimeline, simulate
         tl = movetimeline.build(sim)
         self.timeline.set_data(tl)
@@ -772,10 +791,9 @@ class SimulatorPage(QWidget):
             self.fd_label.setText(tr("<b>A</b> (current) · ") + self.fd_label.text())
             self.ab_label.setText(tr("<b>B</b> ({0}) · {1} · {2} ticks · {3} hit(s)").format(self.compare.currentText(), text, b.tick, hits))
         self.events.clear()
-        for p in summ["problems"]:
-            it = QListWidgetItem(f"⚠ {p['message']}")       # a mensagem já vem traduzida; o kind é para scripts
-            it.setToolTip(p["kind"])
-            self.events.addItem(it)
+        self._audit_item = QListWidgetItem(tr("Checking the effects…"))
+        self._audit_item.setForeground(self.palette().placeholderText())
+        self.events.addItem(self._audit_item)
         for ev in sim.events:
             snd = ev.get("snd")
             if ev["kind"] == "ctrl" and ev.get("value") == "playsnd" and snd:
@@ -790,7 +808,47 @@ class SimulatorPage(QWidget):
             it = QListWidgetItem(f"t{ev['t']:>4}  {ev.get('who', '')}: {txt}")
             it.setData(Qt.ItemDataRole.UserRole, ev["t"])
             self.events.addItem(it)
-        self.show_tick()
+        self.view.set_message(tr("Drawing…"))
+        self.show_tick()             # o primeiro tick entra na fila antes da auditoria
+        job = Job(lambda: (gen, simulate.audit(sim)))
+        job.signals.done.connect(self._audited)
+        job.signals.failed.connect(self._audit_failed)
+        start(job, self, priority=-1)
+
+    def _audited(self, result) -> None:
+        gen, problems = result
+        if gen != self._gen or self._audit_item is None:
+            return
+        row = self.events.row(self._audit_item)
+        self.events.takeItem(row)
+        self._audit_item = None
+        for k, p in enumerate(problems):
+            it = QListWidgetItem(f"⚠ {p['message']}")       # a mensagem já vem traduzida; o kind é para scripts
+            it.setToolTip(p["kind"])
+            self.events.insertItem(row + k, it)
+
+    def _audit_failed(self, msg: str) -> None:
+        if self._audit_item is not None:
+            self._audit_item.setText(tr("Could not check the effects: ") + msg.splitlines()[0])
+            self._audit_item = None
+
+    def ask_ai(self) -> None:
+        """Manda ao assistente o golpe simulado: estado, frame data e o que a auditoria achou."""
+        if not self.sim:
+            return
+        from ...tools import simulate
+        n = self.sim.chain[0] if self.sim.chain else self.current_state()
+        fd = simulate.frame_data(self.sim)
+        probs = [self.events.item(k).text().lstrip("⚠ ") for k in range(self.events.count())
+                 if self.events.item(k).text().startswith("⚠")]
+        where = {"acerto": "hit", "defesa": "guard"}.get(fd["outcome"], "miss")
+        text = (f"In the simulator, state {n} (P2 {self.p2_mode.currentText().lower()}, {self.dist.value():g} px): "
+                f"startup {fd['startup']}, active {fd['active']}, recovery {fd['recovery']}, {where}"
+                + (f" {fd['advantage']:+d}" if fd.get("advantage") is not None else "") + ". "
+                + ("Problems found: " + "; ".join(probs) + ". " if probs else "No problems found by the audit. ")
+                + "Look at the move (get_move, simulate_state with a picture) and fix what is wrong; "
+                  "tell me what you changed.")
+        self.ctx.ask_ai.emit(text)
 
     @staticmethod
     def _chain_text(r: dict) -> str:
@@ -888,6 +946,8 @@ class SimulatorPage(QWidget):
         if img is not None:
             self._show(img)
             self._prefetch()
+        elif self._key(i) in self._failed:
+            self.view.set_message(tr("Could not draw this tick"), self._failed[self._key(i)])
         else:
             # um tick com várias faíscas giradas leva ~0,5 s: desenha fora da interface e mostra o
             # último pedido (arrastar a linha do tempo pula os do meio em vez de enfileirar)
@@ -898,7 +958,7 @@ class SimulatorPage(QWidget):
         if self._rendering or self._want is None or not self.sim:
             return
         key, self._want = self._want, None
-        if key in self.cache:
+        if key in self.cache or key in self._failed:
             return self.show_tick() if key == self._key(self.slider.value()) else self._prefetch()
         from ...tools import simulate
         sim, simb, box, gen = self.sim, self.sim_b, self.view_box, self._gen
@@ -908,11 +968,16 @@ class SimulatorPage(QWidget):
         def draw(s):                    # a versão mais curta fica no último tick dela
             return simulate.render_tick(s, s.track[min(i, len(s.track) - 1)], box, zoom=zoom,
                                         boxes=boxes, show_p2=p2) if s and s.track else None
-        job = Job(lambda: (gen, key, (draw(sim), draw(simb))))
+        def work():
+            try:
+                return gen, key, (draw(sim), draw(simb))
+            except Exception as e:  # noqa: BLE001 — o tick fica marcado e a tela mostra o erro
+                return gen, key, f"{type(e).__name__}: {e}"
+        job = Job(work)
         job.signals.done.connect(self._rendered)
         job.signals.failed.connect(self._render_failed)
         self._render_job = job
-        start(job, self)
+        start(job, self, priority=1)
 
     def _drop_pending_render(self) -> None:
         # um desenho ainda na fila não serve mais: sai da frente da simulação nova
@@ -926,7 +991,13 @@ class SimulatorPage(QWidget):
         self._rendering = False
         if gen != self._gen:
             return self._kick()
-        while len(self.cache) >= 300:           # tira o mais antigo, não o cache todo
+        if isinstance(img, str):
+            self._failed[key] = img
+            self.ctx.status.emit(tr("Could not draw the tick: ") + img)
+            if key == self._key(self.slider.value()):
+                self.view.set_message(tr("Could not draw this tick"), img)
+            return self._kick() if self._want is not None else self._prefetch()
+        while len(self.cache) >= 400:           # tira o mais antigo, não o cache todo
             self.cache.pop(next(iter(self.cache)))
         self.cache[key] = img
         if key == self._key(self.slider.value()):
@@ -950,15 +1021,16 @@ class SimulatorPage(QWidget):
         if self._rendering or self._want is not None or not self.sim:
             return
         i = self.slider.value()
-        for j in range(i + 1, min(self.slider.maximum() + 1, i + 13)):
-            if self._key(j) not in self.cache:
+        for j in range(i + 1, min(self.slider.maximum() + 1, i + 31)):
+            if self._key(j) not in self.cache and self._key(j) not in self._failed:
                 self._want = self._key(j)
                 return self._kick()
 
     def step(self, d: int, wrap: bool = False) -> None:
         if not self.sim:
             return
-        if wrap and self._key(self.slider.value()) not in self.cache:
+        cur = self._key(self.slider.value())
+        if wrap and cur not in self.cache and cur not in self._failed:
             return          # tocando: espera o tick atual aparecer antes de avançar
         v = self.slider.value() + d
         if v > self.slider.maximum():
@@ -987,7 +1059,8 @@ class SimulatorPage(QWidget):
         now = time.monotonic()
         if self._clock is None:
             self._play_pos = cur
-            missing = [j for j in range(cur, min(last + 1, cur + 6)) if self._key(j) not in self.cache]
+            missing = [j for j in range(cur, min(last + 1, cur + 6))
+                       if self._key(j) not in self.cache and self._key(j) not in self._failed]
             if missing:                     # espera alguns ticks prontos para não engasgar
                 if self._want is None:
                     self._want = self._key(missing[0])
@@ -1006,7 +1079,7 @@ class SimulatorPage(QWidget):
             return
         if target == cur:
             return
-        if self._key(target) not in self.cache:
+        if self._key(target) not in self.cache and self._key(target) not in self._failed:
             # o desenho ficou para trás: segura e recomeça do próximo tick quando ele chegar
             self._clock = None
             self.audio.stop()

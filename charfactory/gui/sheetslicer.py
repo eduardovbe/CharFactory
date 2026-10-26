@@ -799,7 +799,8 @@ class SheetDialog(QDialog):
     def _summarize(self) -> None:
         d = self.det
         rows = max(s.row for s in d.slices) + 1
-        colors = len(np.unique(np.asarray(d.rgba)[d.mask][:, :3], axis=0)) if d.mask.any() else 0
+        from ..tools.ops import unique_colors
+        colors = len(unique_colors(np.asarray(d.rgba)[d.mask][:, :3])) if d.mask.any() else 0
         big = [s for s in d.slices if (s.right - s.left) * (s.bottom - s.top) > 0.5 * d.mask.size]
         text = tr("{0} sprites in {1} row(s) · background {2} · {3} colors ({4})").format(
             len(d.slices), rows, d.info.get("background", "?"), min(colors, 256),

@@ -47,18 +47,61 @@ def export_sprites(char: Character, out_dir: str | Path, group: int | None = Non
     return {"exported": len(rows), "dir": str(out)}
 
 
+def unique_colors(rgb: "np.ndarray", inverse: bool = False):
+    """Cores distintas (N×3, uint8) de pixels RGB e, com `inverse`, o índice de cada pixel nelas.
+    Conta numa tabela de 2^24 em vez de ordenar linhas (np.unique com axis=0 levava ~1 min numa
+    imagem de 3000x3000 e travava o programa)."""
+    import numpy as np
+    flat = np.ascontiguousarray(rgb.reshape(-1, 3), dtype=np.uint8)
+    codes = (flat[:, 0].astype(np.uint32) << 16) | (flat[:, 1].astype(np.uint32) << 8) | flat[:, 2]
+    if len(codes) < 65536:              # pouca coisa: ordenar é mais barato que a tabela
+        found = np.unique(codes, return_inverse=inverse)
+        uniq, inv = found if inverse else (found, None)
+    else:
+        seen = np.zeros(1 << 24, bool)
+        seen[codes] = True
+        uniq = np.flatnonzero(seen).astype(np.uint32)
+        inv = None
+        if inverse:
+            lut = np.zeros(1 << 24, np.int32)
+            lut[uniq] = np.arange(len(uniq), dtype=np.int32)
+            inv = lut[codes]
+    cols = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], axis=1).astype(np.uint8)
+    return (cols, inv.reshape(-1)) if inverse else cols
+
+
 def _nearest_indices(rgb: "np.ndarray", palette: list, first: int = 1) -> "np.ndarray":
     """Índice da cor mais próxima (distância RGB) de cada pixel, procurando de `first` em diante
     (o 0 é a transparência: um pixel preto não pode virar buraco)."""
     import numpy as np
     pal = np.array(palette[first:256] or [(0, 0, 0)], dtype=np.int32)
-    flat = rgb.reshape(-1, 3).astype(np.int32)
-    uniq, inv = np.unique(flat, axis=0, return_inverse=True)
-    best = np.empty(len(uniq), dtype=np.int32)
-    for k in range(0, len(uniq), 4096):             # em blocos: foto com 100 mil cores cabe na memória
-        d = ((uniq[k:k + 4096, None, :] - pal[None, :, :]) ** 2).sum(axis=2)
-        best[k:k + 4096] = d.argmin(axis=1)
+    uniq, inv = unique_colors(rgb, inverse=True)
+    uniq = uniq.astype(np.int32)
+    if len(uniq) > 20000:
+        best = _nearest_tree(uniq, pal)
+    else:
+        best = np.empty(len(uniq), dtype=np.int32)
+        for k in range(0, len(uniq), 4096):         # em blocos: foto com 100 mil cores cabe na memória
+            d = ((uniq[k:k + 4096, None, :] - pal[None, :, :]) ** 2).sum(axis=2)
+            best[k:k + 4096] = d.argmin(axis=1)
     return (best + first)[inv.reshape(-1)].astype(np.uint8)
+
+
+def _nearest_tree(uniq: "np.ndarray", pal: "np.ndarray") -> "np.ndarray":
+    """Cor mais próxima por árvore k-d (foto com milhões de cores: segundos em vez de um minuto).
+    Dá o mesmo que o argmin: cor repetida na paleta fica com o primeiro índice dela, e no empate
+    entre duas cores diferentes ganha o índice menor."""
+    import numpy as np
+    from scipy.spatial import cKDTree
+    _, first_at = np.unique(pal, axis=0, return_index=True)
+    first_at = np.sort(first_at)
+    tree = cKDTree(pal[first_at].astype(np.float64))
+    k = 2 if len(first_at) > 1 else 1
+    d, j = tree.query(uniq.astype(np.float64), k=k)
+    if k == 1:
+        return first_at[j].astype(np.int32)
+    a, b = first_at[j[:, 0]], first_at[j[:, 1]]
+    return np.where(d[:, 1] - d[:, 0] < 1e-9, np.minimum(a, b), a).astype(np.int32)
 
 
 def _opaque_mask(img: Image.Image) -> "np.ndarray":

@@ -968,20 +968,11 @@ class SettingsDialog(QDialog):
         b2 = QPushButton("…")
         b2.clicked.connect(lambda: self.presets.setText(QFileDialog.getExistingDirectory(self, tr("Presets folder")) or self.presets.text()))
         s = ctx.settings
-        self.engine = QComboBox()
-        self.engine.addItem(tr("Automatic"), "auto")
-        self.engine.addItem("MUGEN", "mugen")
-        self.engine.addItem("Ikemen GO", "ikemen")
-        self.engine.setCurrentIndex(max(0, self.engine.findData(s.get("run_engine") or "auto")))
-        self.p2 = QLineEdit(s.get("run_p2", ""))
-        self.p2.setPlaceholderText(tr("empty = the character itself (e.g. kfm)"))
-        self.stage = QLineEdit(s.get("run_stage", ""))
-        self.stage.setPlaceholderText(tr("relative to stages/ (empty = one that exists)"))
-        self.p2_ai = QComboBox()
-        self.p2_ai.addItem(tr("Human (idle)"), 0)
-        for lvl in range(1, 9):
-            self.p2_ai.addItem(tr("AI level {0}").format(lvl), lvl)
-        self.p2_ai.setCurrentIndex(max(0, min(8, int(s.get("run_p2_ai") or 0))))
+        # rodar no motor: o perfil ativo (oponente, palco, IA, vida…) e o botão que edita os perfis
+        self.profile = QComboBox()
+        self._fill_profiles()
+        edit_profiles = QPushButton(tr("Edit profiles…"))
+        edit_profiles.clicked.connect(self._edit_profiles)
         self.autosave = QSpinBox()
         self.autosave.setRange(0, 120)
         self.autosave.setSuffix(" min")
@@ -1050,9 +1041,9 @@ class SettingsDialog(QDialog):
             (tr("Image editor"), _pair(self.image_editor, b3)),
             ("ffmpeg", _pair(self.ffmpeg, b4))]))
         lay.addWidget(group(tr("Run in the engine (Ctrl+R)"), [
-            (tr("Engine"), self.engine),
-            tr("Automatic: the engine of the folder the character is in; outside one, ZSS characters run in Ikemen GO and the others in MUGEN. Debug › Run in MUGEN / Run in Ikemen GO pick one for a single run."),
-            (tr("Opponent (P2)"), self.p2), (tr("Stage"), self.stage), (tr("P2 AI"), self.p2_ai)]))
+            (tr("Active profile"), _pair(self.profile, edit_profiles)),
+            tr("Each profile keeps the engine, opponent, stage, who plays each side, life, power, rounds and "
+               "the Ikemen GO options. The arrow next to Run in the toolbar switches profiles.")]))
         lay.addWidget(group(tr("Editing"), [
             (tr("Automatic backup"), self.autosave), (tr("Undo limit"), self.undo_limit), self.watch]))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -1060,15 +1051,26 @@ class SettingsDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
+    def _fill_profiles(self) -> None:
+        from ..tools import runner
+        self.profile.clear()
+        self.profile.addItems([p.name for p in runner.load_profiles(self.ctx.settings)])
+        self.profile.setCurrentText(runner.active_profile(self.ctx.settings).name)
+
+    def _edit_profiles(self) -> None:
+        from .runprofiles import RunProfilesDialog
+        # as pastas digitadas aqui já valem para a lista de chars e palcos da janela dos perfis
+        self.ctx.settings["mugen_dir"] = self.mugen.text().strip()
+        self.ctx.settings["ikemen_dir"] = self.ikemen.text().strip()
+        RunProfilesDialog(self.ctx, self, select=self.profile.currentText()).exec()
+        self._fill_profiles()
+
     def save(self) -> None:
         s = self.ctx.settings
         s["mugen_dir"] = self.mugen.text().strip()
         s["ikemen_dir"] = self.ikemen.text().strip()
-        s["run_engine"] = self.engine.currentData()
         s["presets_dir"] = self.presets.text().strip()
-        s["run_p2"] = self.p2.text().strip()
-        s["run_stage"] = self.stage.text().strip()
-        s["run_p2_ai"] = self.p2_ai.currentData()
+        s["run_profile"] = self.profile.currentText()
         s["autosave_min"] = self.autosave.value()
         s["file_watcher"] = self.watch.isChecked()
         s["ffmpeg"] = self.ffmpeg.text().strip()

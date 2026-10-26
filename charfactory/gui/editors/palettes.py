@@ -2,6 +2,9 @@
 de cor, variante por matiz/saturação/brilho e as 12 paletas por faixas de cor, numa janela só."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from PySide6.QtCore import QRectF, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame,
@@ -340,7 +343,7 @@ class PaletteEditor(QWidget):
                 (tr("Move selection → (with remap)"), lambda: self.shift(1)),
                 (tr("Optimize (clear unused colors)"), self.optimize)]),
             (tr("Files"), [
-                (tr("Import .act…"), self.import_act), (tr("Export .act…"), self.export_act),
+                (tr("Import palette (.act or image)…"), self.import_act), (tr("Export .act…"), self.export_act),
                 (tr("Generate images of all palettes…"), self.gen_images),
                 (tr("Fit an image to this palette…"), self.adapt_image)]),
         ]
@@ -1212,7 +1215,28 @@ class PaletteEditor(QWidget):
         self.ctx.status.emit(tr("Fitted image saved to {0}").format(dst))
 
     def import_act(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, tr("Import palette"), "", tr("ACT palette (*.act)"))
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("Import palette"), "",
+            tr("Palette or image with a palette (*.act *.png *.pcx *.gif *.bmp);;ACT palette (*.act)"))
+        if path and not path.lower().endswith(".act"):
+            # a paleta embutida da imagem (PNG/PCX/GIF indexado), índice por índice
+            from ...tools import spriteimport as SI
+            try:
+                cols = SI.palette_from_image(path)
+            except (OSError, ValueError) as e:
+                return self.ctx.status.emit(tr("Could not read the image: {0}").format(e))
+            if self.is_own():
+                cols = cols[:len(self.current_palette().colors)]
+                edit.set_palette_colors(self.char, self._slot, {str(i): list(c) for i, c in enumerate(cols)})
+            else:                                # o mesmo caminho do .act (cria a 1,N se faltar)
+                import tempfile
+                from ...formats import act
+                tmp = Path(tempfile.gettempdir()) / f"charfactory_pal_{os.getpid()}.act"
+                act.save((cols + [(0, 0, 0)] * 256)[:256], tmp)
+                ops.import_palette(self.char, self._slot, tmp)
+                tmp.unlink(missing_ok=True)
+            self.ctx.status.emit(tr("{0} colors taken from the image palette").format(len(cols)))
+            return self._done()
         if path:
             if self.is_own():                    # paleta própria: as cores do .act entram nela
                 from ...formats import act

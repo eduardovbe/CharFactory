@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
 from ..i18n import tr
+from .ops import _nearest_indices, unique_colors
 
 
 @dataclass
@@ -186,7 +187,7 @@ def shared_palette(crops: list[Image.Image], max_colors: int = 256) -> tuple[lis
     for im in crops:
         a = np.asarray(im)
         opaque = a[a[..., 3] > 0][:, :3]
-        colors.update(map(tuple, np.unique(opaque, axis=0).tolist()) if opaque.size else [])
+        colors.update(map(tuple, unique_colors(opaque).tolist()) if opaque.size else [])
     if len(colors) <= max_colors - 1:
         return [(255, 0, 255)] + sorted(colors), True
     # quantiza juntando todos os pixels opacos num mosaico
@@ -199,13 +200,9 @@ def shared_palette(crops: list[Image.Image], max_colors: int = 256) -> tuple[lis
 
 def to_indexed(crop: Image.Image, palette: list[tuple]) -> Image.Image:
     """RGBA -> 'P' com a paleta dada (cor mais próxima; alfa 0 vira índice 0)."""
-    a = np.asarray(crop).astype(np.int32)
+    a = np.asarray(crop.convert("RGBA"))
     rgb, alpha = a[..., :3], a[..., 3]
-    pal = np.array(palette[1:], dtype=np.int32)
-    flat = rgb.reshape(-1, 3)
-    uniq, inv = np.unique(flat, axis=0, return_inverse=True)
-    d = ((uniq[:, None, :] - pal[None, :, :]) ** 2).sum(axis=2)
-    idx = (d.argmin(axis=1) + 1)[inv.ravel()].reshape(alpha.shape)
+    idx = _nearest_indices(rgb, [tuple(c[:3]) for c in palette]).reshape(alpha.shape)
     idx[alpha == 0] = 0
     img = Image.fromarray(idx.astype(np.uint8), "P")
     flatpal = [c for col in palette for c in col]
@@ -289,7 +286,7 @@ def export(det: Detection, out_dir: str | Path, max_colors: int = 256,
     pal, exact = (palette, False) if palette else shared_palette(crops, max_colors)
     if palette:
         exact = all(tuple(c) in set(map(tuple, palette)) for im in crops
-                    for c in np.unique(np.asarray(im)[np.asarray(im)[..., 3] > 0][:, :3], axis=0).tolist())
+                    for c in unique_colors(np.asarray(im)[np.asarray(im)[..., 3] > 0][:, :3]).tolist())
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

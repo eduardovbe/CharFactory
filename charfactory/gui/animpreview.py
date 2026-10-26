@@ -69,6 +69,8 @@ class AnimPreview(QWidget):
         self.background = (0, 0, 0, 0)  # efeito aditivo some no transparente: a biblioteca usa preto
         self._cache: dict = {}
         self._pending: int | None = None
+        self._gen = 0                 # descarta desenhos de uma ação que já foi trocada
+        self.loading = False
         self.timer = QTimer(self, singleShot=True, timeout=self._next)
         self._load_timer = QTimer(self, singleShot=True, interval=150, timeout=self._load)
 
@@ -108,6 +110,7 @@ class AnimPreview(QWidget):
 
     def reset(self) -> None:
         self._cache.clear()
+        self._gen += 1
         n, self.number = self.number, None
         if n is not None:
             self.show_anim(n)
@@ -135,16 +138,49 @@ class AnimPreview(QWidget):
             self.view.update()
             return
         key = (id(char), n)
-        if key not in self._cache:
-            self._cache[key] = self._render(char, n, self.background)
-        self.frames, self.loopstart, self.axis, self.empty_text = self._cache[key]
+        self._gen += 1
+        if key in self._cache:
+            return self._apply(self._cache[key])
+        # ação com dezenas de quadros grandes levava segundos e travava a interface: desenha
+        # fora dela e mostra "carregando" enquanto isso
+        from .editors.simulator import Job, start
+        gen, bg = self._gen, self.background
+        self.loading = True
+        self.empty_text = tr("Loading action {0}…").format(n)
+        self._set_header()
+        self.view.update()
+        job = Job(lambda: (gen, key, self._render_images(char, n, bg)))
+        job.signals.done.connect(self._rendered)
+        job.signals.failed.connect(self._render_failed)
+        start(job, self, priority=1)
+
+    def _rendered(self, result) -> None:
+        gen, key, (images, loop, axis, msg) = result
+        if gen != self._gen:
+            return              # outra ação foi pedida, ou o char mudou no meio do desenho
+        entry = ([(QPixmap.fromImage(q), t) for q, t in images], loop, axis, msg)
+        while len(self._cache) >= 48:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[key] = entry
+        self._apply(entry)
+
+    def _render_failed(self, msg: str) -> None:
+        self.loading = False
+        self.empty_text = msg.splitlines()[0]
+        self.view.update()
+
+    def _apply(self, entry) -> None:
+        self.loading = False
+        self.frames, self.loopstart, self.axis, self.empty_text = entry
+        self.index = 0
         self._set_header()
         self.view.update()
         if self.frames and self.playing and self.isVisible():
             self._schedule()
 
     @staticmethod
-    def _render(char, n: int, background=(0, 0, 0, 0)):
+    def _render_images(char, n: int, background=(0, 0, 0, 0)):
+        """Quadros da ação como QImage (pode rodar fora da interface; o QPixmap não pode)."""
         act = char.anims.get(n) if char.anims else None
         if act is None:
             return [], 0, (0, 0), tr("Action {0} does not exist in the .AIR").format(n)
@@ -156,10 +192,15 @@ class AnimPreview(QWidget):
             for i, f in enumerate(act.frames):
                 img = render.render_frame(char, act, i, None, False, 1, background=background, bounds=b,
                                           axis=False)
-                frames.append((QPixmap.fromImage(pil_to_qimage(img)), f.time))
+                frames.append((pil_to_qimage(img), f.time))
         except Exception as e:  # noqa: BLE001 — sprite faltando ou SFF ilegível: só avisa
             return [], 0, (0, 0), tr("Could not draw action {0}: {1}").format(n, e)
         return frames, min(act.loopstart, len(frames) - 1), (-b[0], -b[1]), ""
+
+    @staticmethod
+    def _render(char, n: int, background=(0, 0, 0, 0)):
+        frames, loop, axis, msg = AnimPreview._render_images(char, n, background)
+        return [(QPixmap.fromImage(q), t) for q, t in frames], loop, axis, msg
 
     def _set_header(self) -> None:
         if self.number is None:

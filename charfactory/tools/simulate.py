@@ -1587,9 +1587,13 @@ def _screen_layer(sim: Sim, rec: dict, size, front: bool):
         mode, al, _ = _blend(x["frame"], x["trans"], x.get("alpha"))
         if mode == "add":
             # brilho aditivo sobre o que estiver atrás: vira alfa pelo brilho do pixel
-            a = np.asarray(im.convert("RGBA"), np.float32)
-            a[..., 3] = a[..., 3] * a[..., :3].max(axis=2) / 255 * al
-            im = Image.fromarray(a.astype(np.uint8), "RGBA")
+            glow = sim.__dict__.setdefault("_glow_cache", {})
+            k = (id(im), al)
+            if k not in glow or glow[k][0] is not im:
+                a = np.asarray(im.convert("RGBA"), np.float32)
+                a[..., 3] = a[..., 3] * _rgb_max(a) / 255 * al
+                glow[k] = (im, Image.fromarray(a.astype(np.uint8), "RGBA"))
+            im = glow[k][1]
         cv.blit(im, ax, ay, x["pos"][0], x["pos"][1], x["scale"][0], x["scale"][1], x["facing"],
                 x["angle"], "normal", 1.0)
     return cv.im.resize(size, Image.BILINEAR)
@@ -1787,29 +1791,40 @@ def _frame_key(f) -> tuple:
     return (f.group, f.item, f.x, f.y, (f.flip or "").upper())
 
 
+def _rgb_max(a):
+    """Maior canal (R, G ou B) de cada pixel: elemento a elemento é ~10x mais rápido que
+    a[..., :3].max(2), que reduz num eixo não contíguo."""
+    return np.maximum(np.maximum(a[..., 0], a[..., 1]), a[..., 2])
+
+
 def _sprite_measure(sim: Sim, f, what: str):
     """Medida de um quadro (pixels visíveis ou área apagada), guardada na simulação: um super
-    repete os mesmos quadros em centenas de ticks e decodificar cada vez levava ~40 s."""
+    repete os mesmos quadros em centenas de ticks e decodificar cada vez levava ~40 s. A medida
+    é do sprite (sem o deslocamento do quadro), então quadros do mesmo sprite em lugares
+    diferentes medem uma vez só."""
     cache = sim.__dict__.setdefault("_fx_cache", {})
-    key = (_frame_key(f), what)
-    if key in cache:
-        return cache[key]
-    im, ax, ay = _frame_img(sim.char, f)
-    out = None
-    if im is not None:
-        a = np.asarray(im)
-        mx = a[..., :3].max(2)
-        if what == "dim":
-            out = int(((a[..., 3] > 0) & (mx >= 20) & (mx < 90)).sum())
-        else:
-            ys, xs = np.nonzero((a[..., 3] > 0) & (mx >= (90 if what == "bright" else 40)))
-            if xs.size:
-                if xs.size > 4000:
-                    k = np.linspace(0, xs.size - 1, 4000).astype(int)
-                    xs, ys = xs[k], ys[k]
-                out = (xs - ax, ys - ay)
-    cache[key] = out
-    return out
+    key = (f.group, f.item, (f.flip or "").upper(), what)
+    if key not in cache:
+        im, ax, ay = _frame_img(sim.char, f)
+        out = None
+        if im is not None:
+            ax, ay = ax + f.x, ay + f.y
+            a = np.asarray(im)
+            mx = _rgb_max(a)
+            if what == "dim":
+                out = int(((a[..., 3] > 0) & (mx >= 20) & (mx < 90)).sum())
+            else:
+                ys, xs = np.nonzero((a[..., 3] > 0) & (mx >= (90 if what == "bright" else 40)))
+                if xs.size:
+                    if xs.size > 4000:
+                        k = np.linspace(0, xs.size - 1, 4000).astype(int)
+                        xs, ys = xs[k], ys[k]
+                    out = (xs - ax, ys - ay)
+        cache[key] = out
+    out = cache[key]
+    if out is None or what == "dim":
+        return out
+    return out[0] + f.x, out[1] + f.y
 
 
 def _effect_points(sim: Sim, x: dict, bright: bool = False):
@@ -1853,6 +1868,7 @@ def audit(sim: Sim) -> list[dict]:
     h = sim.stand_h
     out = []
     seen = set()
+    measured = set()
 
     def add(kind, msg, key):
         if key in seen:
@@ -1866,6 +1882,13 @@ def audit(sim: Sim) -> list[dict]:
                    angle=e.get("angle", 0.0), trans=e["trans"] or "add", label=f"helper {e['state']}", anim=-1,
                    on_hit=False) for e in rec["ents"] if e["helper"] and not e["inv"] and e["frame"]]
         for x in rec["explods"] + hx:
+            # o mesmo efeito parado no mesmo lugar em vários ticks dá a mesma medida: mede uma vez
+            f = x["frame"]
+            k = (_frame_key(f) if f is not None else None, tuple(x["pos"]), tuple(x["scale"]), x["angle"],
+                 x["facing"], x["vfacing"], x["trans"], x["on_hit"], x["label"], x["anim"], bool(rec.get("nobg")))
+            if k in measured:
+                continue
+            measured.add(k)
             b = _effect_box(sim, x)
             if b is None:
                 continue

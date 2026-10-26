@@ -391,6 +391,7 @@ class MainWindow(QMainWindow):
         self.ai_host = GuiHost(ctx, self)
         self.mcp = McpService(ctx, self.ai_host)
         self.assistant = AssistantPanel(ctx, self.ai_host, self)
+        ctx.ask_ai.connect(self.ask_assistant)
         work.addWidget(self.assistant)
         self.assistant.hide()
         self.work_split = work
@@ -583,6 +584,9 @@ class MainWindow(QMainWindow):
         self.act(d, tr("Run in the engine"), self.run_mugen, "Ctrl+R", "run")
         self.act(d, tr("Run in MUGEN"), lambda: self.run_mugen("mugen"))
         self.act(d, tr("Run in Ikemen GO"), lambda: self.run_mugen("ikemen"))
+        self.run_profiles_menu = d.addMenu(tr("Run with profile"))
+        self.run_profiles_menu.aboutToShow.connect(lambda: self._fill_profile_menu(self.run_profiles_menu))
+        self.act(d, tr("Run profiles…"), self.run_profiles, "Ctrl+Shift+R")
         d.addSeparator()
         d.addAction(tool["cmd_test"])
 
@@ -681,8 +685,15 @@ class MainWindow(QMainWindow):
         main.addWidget(spacer)
         self._extra_action = main.addWidget(self.extra)
         self._extra_sep = main.addSeparator()
-        self._char_actions += [main.addAction(icon("run"), tr("Run in the engine (Ctrl+R)"), self.run_mugen),
-                               main.addAction(icon("validate"), tr("Validate (F7)"), self.validate)]
+        run_act = main.addAction(icon("run"), tr("Run in the engine (Ctrl+R)"), self.run_mugen)
+        # a seta ao lado de Rodar escolhe o perfil (oponente, IA, vida, energia…)
+        run_menu = QMenu(self)
+        run_menu.aboutToShow.connect(lambda: self._fill_profile_menu(run_menu))
+        run_act.setMenu(run_menu)
+        rb = main.widgetForAction(run_act)
+        if isinstance(rb, QToolButton):
+            rb.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._char_actions += [run_act, main.addAction(icon("validate"), tr("Validate (F7)"), self.validate)]
         main.addAction(icon("command"), tr("Command palette (F1)"), self.command_palette)
         main.addAction(icon("options"), tr("Options (Ctrl+K)"), self.settings_dialog)
         self.addToolBar(main)
@@ -1500,14 +1511,28 @@ class MainWindow(QMainWindow):
         {"palfx": self.palfx, "throw": self.throw, "var_list": self.var_list,
          "offset": self.offset_viewer, "wizard": self.move_wizard}.get(name, lambda: None)()
 
-    def run_mugen(self, engine: str | None = None) -> None:
-        """Roda no motor: o das Opções (Ctrl+R) ou o pedido no menu ('mugen'/'ikemen')."""
+    def _fill_profile_menu(self, menu) -> None:
+        from .runprofiles import profile_menu
+        profile_menu(self.ctx, menu, lambda name: self.run_mugen(profile=name), self.run_profiles)
+
+    def run_profiles(self) -> None:
+        """Janela dos perfis de execução; Salvar e rodar roda com o perfil escolhido."""
+        from .runprofiles import RunProfilesDialog
+        dlg = RunProfilesDialog(self.ctx, self)
+        dlg.run_requested.connect(lambda prof: self.run_mugen(profile=prof))
+        dlg.exec()
+
+    def run_mugen(self, engine: str | None = None, profile=None) -> None:
+        """Roda no motor com o perfil ativo (Ctrl+R) ou o pedido (nome ou RunProfile); `engine`
+        ('mugen'/'ikemen', do menu) troca só o motor desta vez."""
         if not self.need_char():
             return
         c = self.ctx.char
         s = self.ctx.settings
+        prof = profile if isinstance(profile, runner.RunProfile) else \
+            runner.active_profile(s, profile if isinstance(profile, str) else None)
         if not isinstance(engine, str):           # vindo do menu, o Qt passa o 'checked' da ação
-            engine = s.get("run_engine") or "auto"
+            engine = prof.engine or "auto"
         root, engine = runner.engine_root(c, engine, s.get("mugen_dir") or None, s.get("ikemen_dir") or None)
         title = runner.ENGINE_NAMES[engine]
         if engine == "mugen" and c.is_zss:
@@ -1531,11 +1556,14 @@ class MainWindow(QMainWindow):
                 return
             r = charkit.install(c.dir, root)
             arg = f"{Path(r['installed']).name}/{c.def_path.name}"
-        args = runner.engine_args(exe, arg, s.get("run_p2") or None, s.get("run_stage") or charkit.default_stage(root),
-                                  p2_ai=s.get("run_p2_ai") or None)
+        args = runner.profile_args(exe, engine, arg, prof, prof.stage or charkit.default_stage(root))
         problem = runner.config_problem(root, engine)
         if problem:
             self.engine_out.appendPlainText(f"[{datetime.datetime.now():%H:%M:%S}] ⚠ {problem}")
+        skipped = prof.unsupported(engine)
+        if skipped:
+            self.engine_out.appendPlainText(tr("[{0:%H:%M:%S}] profile {1}: left out in {2} (Ikemen GO only): {3}").format(
+                datetime.datetime.now(), prof.name, title, ", ".join(skipped)))
         started = time.time()
         # a saída do console do motor (o Ikemen avisa ali dos parâmetros e sons do personagem)
         # vai para o painel, sem abrir uma janela de console
@@ -1545,7 +1573,8 @@ class MainWindow(QMainWindow):
         lines: queue.SimpleQueue = queue.SimpleQueue()
         reader = threading.Thread(target=lambda: [lines.put(ln.rstrip()) for ln in proc.stdout], daemon=True)
         reader.start()
-        self.engine_out.appendPlainText(f"[{datetime.datetime.now():%H:%M:%S}] {exe.name} {' '.join(args[1:])}  (pid {proc.pid})")
+        self.engine_out.appendPlainText(f"[{datetime.datetime.now():%H:%M:%S}] [{prof.name}] {exe.name} {' '.join(args[1:])}  (pid {proc.pid})")
+        self.ctx.status.emit(tr("Running in {0} with the profile {1}").format(title, prof.name))
         self.show_bottom(2)
 
         def drain():
@@ -1565,6 +1594,8 @@ class MainWindow(QMainWindow):
             if log:
                 self.engine_out.appendPlainText(log)
         QTimer.singleShot(1000, check)
+        return {"engine": engine, "profile": prof.name, "args": args[1:], "pid": proc.pid,
+                "skipped_options": skipped, "note": "running; the engine output goes to the Engine panel"}
 
     def sheet(self) -> None:
         dialogs.SheetDialog(self.ctx, self).exec()
@@ -1636,6 +1667,11 @@ class MainWindow(QMainWindow):
         self.assistant_action.blockSignals(True)
         self.assistant_action.setChecked(on)
         self.assistant_action.blockSignals(False)
+
+    def ask_assistant(self, text: str) -> None:
+        """Abre o assistente com o pedido (um botão "Pedir à IA" de outra página)."""
+        self.toggle_assistant(True)
+        self.assistant.ask(text)
 
     def ai_settings(self, tab: int = 0) -> None:
         from .aipanel import AISettingsDialog

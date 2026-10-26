@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Run profiles (Debug › Run profiles, Ctrl+Shift+R): opponent, stage, AI, palette, life and power per side, rounds, time and Ikemen GO options; the arrow next to Run picks one.
+- `charfactory run --profile NAME` uses the profiles saved in the app.
+- Import images: palette embedded in the image (optionally as palette 1,1), recommended mode, scale and "fit to the character's height".
+- Palettes: import a palette from an image (PNG, PCX, GIF, BMP) besides .act.
+- AI: tools to inspect and import images, take a palette from an image, list run profiles and run in the engine.
+- AI: quick actions for what is on screen and "Ask the AI to fix this move" in the simulator.
+
+### Fixed
+
+- Simulator: ticks draw several times faster (sprites are decoded once), the first tick shows before the effect audit, and big zoomed or rotated sprites no longer vanish.
+- A tick that fails to draw shows the error instead of stalling playback.
+- The animation preview next to States draws in the background instead of freezing the window.
+- Importing or editing a very large image no longer freezes the program (minutes to seconds).
+
 ## [0.3.0] - 2026-10-21
 
 ### Added

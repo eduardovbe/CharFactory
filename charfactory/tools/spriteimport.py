@@ -1,6 +1,8 @@
 """Importar imagens como sprites.
 
 Paleta (`mode`):
+- "embedded": a paleta que já vem na imagem indexada (PNG/PCX/GIF de até 256 cores), com os
+  índices e as cores como estão; com `as_char_palette` ela vira a paleta do personagem (1,1);
 - "char": a paleta do personagem (1,1); o sprite muda junto com as 12 paletas do jogador;
 - "palette": adapta a imagem a uma paleta que já está no SFF (cor mais próxima);
 - "swap": mantém os índices da imagem indexada e usa a paleta escolhida (a "troca" do FF:
@@ -11,6 +13,8 @@ Paleta (`mode`):
 - "truecolor": PNG 32 bits sem paleta (SFF 2.01: MUGEN 1.1 e Ikemen), para imagens com mais
   cores do que uma paleta comporta; PalFX e as paletas do jogador não mudam esses sprites.
 `reversed` inverte a ordem da paleta de uma imagem indexada (a última cor vira a 0).
+`scale` muda o tamanho antes de tudo (imagem HD grande demais para um char); `smooth` suaviza
+a redução (só em imagens de cores reais: as indexadas sempre por vizinho mais próximo).
 
 Transparência (`trans`): o que vira o índice 0 (o fundo, que o motor não desenha) —
 "auto" (canal alfa se houver, senão o índice 0 de imagem indexada, senão a cor do canto),
@@ -34,7 +38,7 @@ from PIL import Image
 from ..i18n import tr
 from ..project import Character
 
-MODES = ("char", "palette", "swap", "own", "truecolor")
+MODES = ("embedded", "char", "palette", "swap", "own", "truecolor")
 TRANS = ("auto", "alpha", "topleft", "index0", "color")
 ANCHORS = {"tl": (0, 0), "t": (0.5, 0), "tr": (1, 0), "l": (0, 0.5), "c": (0.5, 0.5), "r": (1, 0.5),
            "bl": (0, 1), "b": (0.5, 1), "br": (1, 1)}
@@ -58,6 +62,97 @@ class ImportOptions:
     anchor: str = "b"                        # uma das ANCHORS, ou "custom" com `axis`
     axis: tuple[int, int] | None = None
     share: bool = True
+    scale: float = 1.0                       # tamanho final (1 = como está)
+    smooth: bool = False                     # redução suave (cores reais)
+    as_char_palette: bool = False            # "embedded": a paleta da imagem vira a 1,1
+
+
+# ------------------------------------------------------------------ tamanho e análise
+
+BIG_SIDE = 1024           # acima disso a janela sugere reduzir: chars costumam ter 60-250 px
+
+
+def scale_image(img: Image.Image, opts: ImportOptions) -> Image.Image:
+    """A imagem no tamanho pedido (`scale`); indexada sempre por vizinho mais próximo, para os
+    índices continuarem os da paleta."""
+    k = float(opts.scale or 1.0)
+    if abs(k - 1.0) < 1e-6:
+        return img
+    w, h = max(1, round(img.width * k)), max(1, round(img.height * k))
+    smooth = opts.smooth and img.mode != "P" and k < 1
+    out = img.resize((w, h), Image.Resampling.LANCZOS if smooth else Image.Resampling.NEAREST)
+    if img.mode == "P" and "transparency" in img.info:
+        out.info["transparency"] = img.info["transparency"]
+    return out
+
+
+def has_embedded_palette(img: Image.Image) -> bool:
+    return img.mode == "P" and bool(img.getpalette())
+
+
+def image_info(img: Image.Image) -> dict:
+    """O que a janela mostra sobre a imagem: tamanho, se é indexada (paleta embutida), quantas
+    cores a paleta dela tem e quantas a imagem usa, e se tem transparência."""
+    from .ops import unique_colors
+    indexed = has_embedded_palette(img)
+    info = {"size": img.size, "mode": img.mode, "indexed": indexed, "big": max(img.size) > BIG_SIDE,
+            "alpha": img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info}
+    if indexed:
+        info["palette_size"] = len(img.getpalette()) // 3
+        info["used"] = int(np.asarray(img).max()) + 1 if img.width * img.height else 0
+    else:
+        sample = img if img.width * img.height <= 4_000_000 else img.resize(
+            (max(1, img.width // 2), max(1, img.height // 2)), Image.Resampling.NEAREST)
+        a = np.asarray(sample.convert("RGBA"))
+        info["colors"] = len(unique_colors(a[a[..., 3] >= 128][:, :3])) if a.size else 0
+    return info
+
+
+def recommend(images: list[Image.Image], char: Character) -> tuple[str, str]:
+    """(modo, motivo) que a janela marca como recomendado para estas imagens."""
+    if not images:
+        return "own", ""
+    if all(has_embedded_palette(im) for im in images):
+        k = char.sprites.find_palette(1, 1)
+        if k >= 0:
+            mine = [tuple(c[:3]) for c in char.sprites.palettes[k].colors]
+            for im in images:
+                raw = im.getpalette() or []
+                cols = [tuple(raw[i:i + 3]) for i in range(0, len(raw), 3)]
+                used = int(np.asarray(im).max()) + 1
+                if cols[1:used] != mine[1:used]:
+                    break
+            else:
+                return "char", tr("the image already uses the character's palette")
+        return "embedded", tr("the image has its own palette: it goes in exactly as it is")
+    n = max(image_info(im).get("colors", 0) for im in images)
+    k = char.sprites.find_palette(1, 1)
+    if k >= 0 and n <= 255:
+        # desenhada com as cores do personagem: entra na 1,1 sem mudar nada
+        from .ops import unique_colors
+        mine = {tuple(c[:3]) for c in char.sprites.palettes[k].colors[1:]}
+        for im in images:
+            a = np.asarray(im.convert("RGBA"))
+            if not {tuple(c) for c in unique_colors(a[a[..., 3] >= 128][:, :3]).tolist()} <= mine:
+                break
+        else:
+            return "char", tr("every color of the image is in the character's palette")
+    if n > 4096:
+        return "truecolor", tr("{0} colors: a palette of 256 would change them a lot").format(f"{n:,}".replace(",", "."))
+    return "own", tr("{0} colors: they fit in a palette of their own").format(n)
+
+
+def palette_from_image(path) -> list[tuple[int, int, int]]:
+    """A paleta embutida de uma imagem indexada (PNG/PCX/GIF/BMP), na ordem dos índices; numa
+    imagem de cores reais, até 256 cores dela (a 0 é a do canto, o fundo)."""
+    img = Image.open(Path(path))
+    img.load()
+    if has_embedded_palette(img):
+        raw = img.getpalette()
+        return [tuple(raw[i:i + 3]) for i in range(0, min(len(raw), 768), 3)]
+    mask, bg = background(img, ImportOptions(trans="auto"))
+    pix = np.asarray(img.convert("RGB"))[~mask]
+    return [bg or (0, 0, 0), *_make_palette(pix, 255)]
 
 
 # ------------------------------------------------------------------ números e eixo
@@ -134,8 +229,9 @@ def background(img: Image.Image, opts: ImportOptions) -> tuple[np.ndarray, tuple
 
 
 def count_colors(img: Image.Image, mask: np.ndarray) -> int:
+    from .ops import unique_colors
     rgb = np.asarray(img.convert("RGB"))[~mask]
-    return len(np.unique(rgb.reshape(-1, 3), axis=0)) if rgb.size else 0
+    return len(unique_colors(rgb)) if rgb.size else 0
 
 
 # ------------------------------------------------------------------ cores
@@ -156,9 +252,15 @@ def _quantize_to(rgb: np.ndarray, colors: list, dither: bool) -> np.ndarray:
 
 def _make_palette(pixels: np.ndarray, n: int) -> list[tuple[int, int, int]]:
     """Até `n` cores para os pixels (N×3): todas se couberem, senão o Pillow escolhe."""
-    uniq = np.unique(pixels.reshape(-1, 3), axis=0) if pixels.size else np.zeros((1, 3), np.uint8)
+    from .ops import unique_colors
+    uniq = unique_colors(pixels) if pixels.size else np.zeros((1, 3), np.uint8)
     if len(uniq) <= n:
         return [tuple(int(v) for v in c) for c in uniq]
+    if len(pixels) > 1_000_000:
+        # foto grande: a paleta sai de uma amostra de 1 milhão de pixels (a mediana das cores
+        # quase não muda e o corte mediano em milhões de pixels levava dezenas de segundos)
+        k = np.linspace(0, len(pixels) - 1, 1_000_000).astype(np.int64)
+        pixels = pixels.reshape(-1, 3)[k]
     side = int(np.ceil(np.sqrt(len(pixels))))
     strip = np.zeros((side * side, 3), np.uint8)
     strip[:len(pixels)] = pixels
@@ -211,7 +313,14 @@ def convert(images: list[Image.Image], char: Character, opts: ImportOptions) -> 
             out.append({"image": res, "colors": [tuple(c[:3]) for c in target], "lost": 0.0,
                         "mask": np.asarray(im) == 0})
         return out
-    if opts.mode in ("char", "palette"):
+    if opts.mode == "embedded":
+        for im in images:
+            if not has_embedded_palette(im):
+                name = Path(getattr(im, "filename", "") or "image").name
+                raise ValueError(tr("{0}: this image has no palette of its own (it is not indexed). "
+                                    "Use Own palette or True colors").format(name))
+        per_image = [None] * len(images)
+    elif opts.mode in ("char", "palette"):
         per_image = [_target_palette(char, opts)] * len(images)
     else:
         n = max(2, min(255, int(opts.colors)))
@@ -243,7 +352,8 @@ def convert(images: list[Image.Image], char: Character, opts: ImportOptions) -> 
             idx[m] = 0
             res = Image.fromarray(idx.astype(np.uint8), "P")
             used = int(idx.max()) + 1 if idx.size else 1
-            colors = cols[:max(used, 1)]
+            # a embutida entra inteira (as imagens de um lote com a mesma paleta dividem uma só)
+            colors = cols if opts.mode == "embedded" else cols[:max(used, 1)]
             lost = 0.0
         else:
             rgb = np.asarray(im.convert("RGB"))
@@ -328,7 +438,7 @@ def import_images(char: Character, paths: list, group: int, first_item: int,
                   opts: ImportOptions) -> dict:
     """Importa as imagens nos números de `targets` com o eixo de `axis_for`. Devolve os sprites
     feitos, as paletas criadas, os que viraram link e o quanto as cores mudaram."""
-    images = open_images(paths)
+    images = [scale_image(im, opts) for im in open_images(paths)]
     conv = convert(images, char, opts)
     s = char.sprites
     shared_index = None
@@ -345,6 +455,18 @@ def import_images(char: Character, paths: list, group: int, first_item: int,
             pi = None
         elif opts.mode in ("char", "palette", "swap"):
             pi = s.find_palette(*((1, 1) if opts.mode == "char" else opts.palette))
+        elif opts.mode == "embedded" and opts.as_char_palette:
+            k = s.find_palette(1, 1)
+            cols = list(c["colors"])
+            if k >= 0 and len(s.palettes[k].colors) > len(cols):     # não encolhe a 1,1
+                cols += s.palettes[k].colors[len(cols):]
+            pi = s.add_palette(cols, 1, 1)
+            if [1, 1] not in palettes:
+                palettes.append([1, 1])
+        elif opts.mode == "embedded":
+            pi, created = _own_palette(char, c["colors"], g, item, ImportOptions(reuse=True))
+            if created:
+                palettes.append([s.palettes[pi].group, s.palettes[pi].item])
         elif opts.shared and len(paths) > 1 and shared_index is not None:
             pi = shared_index
         else:

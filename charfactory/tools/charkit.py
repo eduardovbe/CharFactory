@@ -4,6 +4,7 @@ de sprites (com as animações) de outro personagem."""
 from __future__ import annotations
 
 import copy
+import math
 import re
 import shutil
 from pathlib import Path
@@ -60,20 +61,38 @@ def install(src_dir: str | Path, mugen_root: str | Path, folder: str | None = No
     return {"installed": str(dst), "files": sorted(p.name for p in dst.iterdir())}
 
 
+# sprite já em RGBA por (dados, paleta): o simulador desenha os mesmos quadros em centenas de
+# ticks, e converter cada vez custava ~2 ms por sprite (metade do tempo de um tick)
+_RGBA = sffmod.ByteLRU(256 * 1024 * 1024)
+
+
 def sprite_rgba(char: Character, g: int, i: int, palette: int | None = None):
+    """(imagem RGBA, eixo x, eixo y) do sprite. A imagem vem do cache e é compartilhada: quem
+    precisar alterar os pixels faz uma cópia antes."""
     s = char.sprites
     spr = s.find(g, i)
     if spr is None:
         return None, 0, 0
+    src = spr._image if spr._image is not None else spr._data
+    pi = None if spr.is_truecolor else         palette if palette is not None and palette >= 0 else spr.palette_index
+    pal = s.palettes[pi] if pi is not None and 0 <= pi < len(s.palettes) else None
+    if pi is not None and pal is None:
+        pal = sffmod.Palette(1, 1, [(0, 0, 0)])        # índice de paleta inválido: sai preto
+    pkey = pal.key() if pal is not None else None
+    key = (id(src), spr.width, spr.height, pi)
+    hit = _RGBA.get(key, lambda v: v[0] is src and v[1] == pkey)
+    if hit is not None:
+        return hit[2], spr.axis_x, spr.axis_y
     if spr.is_truecolor:
         im = s.image(spr)
     else:
         idx = np.frombuffer(s.pixels(spr), np.uint8).reshape(spr.height, spr.width)
-        pi = palette if palette is not None and palette >= 0 else spr.palette_index
-        pal = s.palettes[pi]
-        cols = np.array(list(pal.colors) + [(0, 0, 0)] * (256 - len(pal.colors)), np.uint8)
-        im = Image.fromarray(np.dstack([cols[idx], np.where(idx > 0, 255, 0).astype(np.uint8)]),
-                            "RGBA")
+        cols = np.zeros((256, 4), np.uint8)
+        c = np.array(pal.colors[:256], np.uint8).reshape(-1, 3)
+        cols[:len(c), :3] = c
+        cols[1:, 3] = 255
+        im = Image.fromarray(cols[idx], "RGBA")
+    _RGBA.put(key, (src, pkey, im), im.width * im.height * 4 + 64)
     return im, spr.axis_x, spr.axis_y
 
 
@@ -113,28 +132,61 @@ class _Canvas:
             return
         w = max(1, round(im.width * abs(sx) * self.sc))
         h = max(1, round(im.height * abs(sy) * self.sc))
-        if w * h > 4_000_000:
-            return
-        im = im.resize((w, h), Image.NEAREST)
         ax, ay = ax * abs(sx) * self.sc, ay * abs(sy) * self.sc
         if facing < 0:
-            im = im.transpose(Image.FLIP_LEFT_RIGHT)
             ax = w - ax
-        if angle:
-            R = int(max(w, h) * 2 + 4)
-            big = Image.new("RGBA", (R, R))
-            big.paste(im, (int(R / 2 - ax), int(R / 2 - ay)))
-            im = big.rotate(angle * (1 if facing > 0 else -1), resample=Image.BILINEAR)
-            ax = ay = R / 2
         px, py = self.P(x, y)
-        px, py = int(px - ax), int(py - ay)
-        # só a área do sprite: uma camada do tamanho da tela por sprite levava ~0,5 s por tick
-        # quando um helper alargava a janela (e segurava o GIL, travando a interface)
-        x0, y0 = max(0, px), max(0, py)
-        x1, y1 = min(self.im.width, px + im.width), min(self.im.height, py + im.height)
-        if x0 >= x1 or y0 >= y1:
-            return
-        im = im.crop((x0 - px, y0 - py, x1 - px, y1 - py))
+        if angle:
+            # sprite enorme na tela: a escala vai junto na transformação (ampliar ele inteiro antes
+            # passava de 4 milhões de pixels); os comuns ampliam antes e giram suave
+            direct = w * h > 4_000_000
+            kx, ky = (w / im.width, h / im.height) if direct else (1.0, 1.0)
+            if not direct:
+                im = im.resize((w, h), Image.NEAREST)
+            if facing < 0:
+                im = im.transpose(Image.FLIP_LEFT_RIGHT)
+            # gira em volta do eixo direto na parte visível da tela (uma transformação afim só):
+            # a tela quadrada de 2x o lado em volta do eixo custava 4x a área e travava com
+            # efeitos grandes girando
+            r = math.radians(angle * (1 if facing > 0 else -1))
+            cs, sn = math.cos(r), math.sin(r)
+            xs, ys = [], []
+            for cx, cy in ((0, 0), (w, 0), (0, h), (w, h)):
+                dx, dy = cx - ax, cy - ay
+                xs.append(px + dx * cs + dy * sn)
+                ys.append(py - dx * sn + dy * cs)
+            x0, y0 = max(0, math.floor(min(xs))), max(0, math.floor(min(ys)))
+            x1, y1 = min(self.im.width, math.ceil(max(xs))), min(self.im.height, math.ceil(max(ys)))
+            if x0 >= x1 or y0 >= y1:
+                return
+            ox, oy = x0 - px, y0 - py
+            im = im.transform((x1 - x0, y1 - y0), Image.AFFINE,
+                              (cs / kx, -sn / kx, (ax + cs * ox - sn * oy) / kx,
+                               sn / ky, cs / ky, (ay + sn * ox + cs * oy) / ky),
+                              resample=Image.NEAREST if direct else Image.BILINEAR)
+        else:
+            px, py = int(px - ax), int(py - ay)
+            # só a área do sprite que cai na tela: uma camada do tamanho da tela por sprite levava
+            # ~0,5 s por tick, e ampliar o sprite inteiro antes de recortar sumia com os grandes
+            x0, y0 = max(0, px), max(0, py)
+            x1, y1 = min(self.im.width, px + w), min(self.im.height, py + h)
+            if x0 >= x1 or y0 >= y1:
+                return
+            if w * h <= 1_000_000:
+                im = im.resize((w, h), Image.NEAREST)
+                if facing < 0:
+                    im = im.transpose(Image.FLIP_LEFT_RIGHT)
+                im = im.crop((x0 - px, y0 - py, x1 - px, y1 - py))
+            else:
+                # sprite enorme na tela: amplia só o recorte (o box do resize dá os mesmos pixels)
+                c0, c1 = x0 - px, x1 - px
+                if facing < 0:
+                    c0, c1 = w - c1, w - c0
+                kx, ky = im.width / w, im.height / h
+                im = im.resize((x1 - x0, y1 - y0), Image.NEAREST,
+                               box=(c0 * kx, (y0 - py) * ky, c1 * kx, (y1 - py) * ky))
+                if facing < 0:
+                    im = im.transpose(Image.FLIP_LEFT_RIGHT)
         if mode == "normal":
             self.im.alpha_composite(im, (x0, y0))
             return

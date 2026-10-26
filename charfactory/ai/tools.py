@@ -1371,6 +1371,130 @@ def list_sounds(host, char):
     return ops.list_sounds(char)
 
 
+# ======================================================================= imagens e paletas
+
+_IMPORT_MODES = ["embedded", "char", "palette", "swap", "own", "truecolor"]
+
+
+def _image_paths(paths) -> list[str]:
+    out = [str(p) for p in ([paths] if isinstance(paths, str) else list(paths or []))]
+    if not out:
+        raise ToolError("give at least one image path")
+    missing = [p for p in out if not Path(p).is_file()]
+    if missing:
+        raise ToolError(f"file(s) not found: {', '.join(missing[:5])}")
+    return out
+
+
+@tool("Look at image files before importing them as sprites: size, whether each one is indexed with "
+      "its own embedded palette (and how many colors it uses) or true color, transparency, and the "
+      "palette mode the import window would recommend, with a small picture of the first one.",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute image paths"}},
+      ("paths",))
+def inspect_images(host, char, paths: list):
+    from ..tools import spriteimport as SI
+    files = _image_paths(paths)
+    images = SI.open_images(files)
+    mode, why = SI.recommend(images, char)
+    rows = []
+    for p, im in zip(files, images):
+        info = SI.image_info(im)
+        info["file"] = Path(p).name
+        rows.append(info)
+    out = {"images": rows, "recommended_mode": mode, "why": why,
+           "note": "big images (more than 1024 px) usually need scale < 1 to match the character "
+                   f"(standing sprite 0,0 is {char.sprites.find(0, 0).height if char.sprites.find(0, 0) else '?'} px tall)"}
+    return Result(json.dumps(out, ensure_ascii=False, default=str), [_png(images[0].convert("RGBA"))])
+
+
+@tool("Import image files as sprites (the same as the Import images window). Palette `mode`: "
+      "embedded = the image's own palette, indices and colors exactly as they are (indexed PNG/PCX/GIF); "
+      "char = fit to the character palette 1,1 (changes with the 12 player palettes, for the body); "
+      "palette = fit to another SFF palette; swap = keep the indices and use an SFF palette; "
+      "own = a new palette made of the image colors; truecolor = 32-bit PNG (MUGEN 1.1/Ikemen). "
+      "Call inspect_images first to pick the mode and the scale.",
+      {"paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute image paths, in order"},
+       "group": _int("Sprite group"), "item": _int("First sprite number (the next images follow)"),
+       "mode": {"type": "string", "enum": _IMPORT_MODES, "description": "Palette mode (default: the recommended one)"},
+       "palette": {"type": "array", "items": {"type": "integer"},
+                   "description": "[group, item] of the SFF palette for palette/swap"},
+       "as_char_palette": _bool("embedded: the image palette also becomes the character palette 1,1"),
+       "scale": {"type": "number", "description": "Size factor applied first, e.g. 0.25 (default 1)"},
+       "smooth": _bool("Smooth reduction (HD art; leave off for pixel art)"),
+       "anchor": {"type": "string", "enum": ["tl", "t", "tr", "l", "c", "r", "bl", "b", "br"],
+                  "description": "Where the axis goes on the image (default b: feet, bottom center)"},
+       "step": {"type": "integer", "enum": [1, 10], "description": "Numbering step (default 1)"},
+       "from_name": _bool("Read group and number from the file names (kfm_200-3.png)"),
+       "autocrop": _bool("Crop the empty border (default true)")},
+      ("paths", "group", "item"), writes=True)
+def import_sprites(host, char, paths: list, group: int, item: int, mode: str | None = None,
+                   palette: list | None = None, as_char_palette: bool = False, scale: float = 1.0,
+                   smooth: bool = False, anchor: str = "b", step: int = 1, from_name: bool = False,
+                   autocrop: bool = True):
+    from ..tools import spriteimport as SI
+    files = _image_paths(paths)
+    if mode is None:
+        mode, _ = SI.recommend([SI.scale_image(im, SI.ImportOptions(scale=scale)) for im in SI.open_images(files)], char)
+    if mode in ("palette", "swap") and not palette:
+        raise ToolError("palette and swap need palette=[group, item]; list_palettes shows them")
+    opts = SI.ImportOptions(mode=mode, palette=tuple(palette) if palette else None, as_char_palette=as_char_palette,
+                            scale=float(scale or 1), smooth=smooth, anchor=anchor, step=step,
+                            from_name=from_name, autocrop=autocrop)
+    r = SI.import_images(char, files, group, item, opts)
+    r["mode"] = mode
+    return r
+
+
+@tool("Replace the colors of a palette with the palette embedded in an image (indexed PNG/PCX/GIF/BMP, "
+      "index by index) or, for a true-color image, up to 256 of its colors.",
+      {"path": _str("Absolute path of the image"),
+       "slot": _int("Character palette 1-12 to replace (default 1)")}, ("path",), writes=True)
+def import_palette_from_image(host, char, path: str, slot: int = 1):
+    import tempfile
+    from ..formats import act
+    from ..tools import spriteimport as SI
+    cols = SI.palette_from_image(_image_paths([path])[0])
+    tmp = Path(tempfile.gettempdir()) / f"charfactory_ai_pal_{slot}.act"
+    act.save((cols + [(0, 0, 0)] * 256)[:256], tmp)
+    try:
+        return ops.import_palette(char, slot, tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# ======================================================================= rodar no motor
+
+@tool("List the run profiles saved in the app (Debug > Run profiles): engine, opponent, stage, who "
+      "plays each side, life, power, rounds and the Ikemen GO options of each one.", needs_char=False)
+def list_run_profiles(host):
+    from ..tools import runner
+    s = getattr(getattr(host, "ctx", None), "settings", None) or runner.gui_settings()
+    active = runner.active_profile(s).name
+    return {"active": active, "profiles": [
+        {k: v for k, v in p.to_dict().items() if v not in (None, "", 0, False) or k == "name"}
+        for p in runner.load_profiles(s)]}
+
+
+@tool("Open the character in MUGEN or Ikemen GO with a run profile (the active one by default), "
+      "for the user to play: the real engine shows what the simulator cannot. Only when the user asks "
+      "to run or test in the engine; it saves nothing.",
+      {"profile": _str("Profile name (list_run_profiles); default the active one"),
+       "engine": {"type": "string", "enum": ["auto", "mugen", "ikemen"], "description": "Only this time"}},
+      writes=True)
+def run_in_engine(host, char, profile: str | None = None, engine: str | None = None):
+    from ..tools import runner
+    s = getattr(getattr(host, "ctx", None), "settings", None) or runner.gui_settings()
+    names = [p.name for p in runner.load_profiles(s)]
+    if profile and profile not in names:
+        raise ToolError(f"profile '{profile}' not found; saved: {', '.join(names)}")
+    prof = runner.active_profile(s, profile)
+    launch = getattr(host, "run_engine", None)
+    if launch is not None:                    # na janela: roda sem travar e a saída vai para o painel
+        return launch(prof, engine)
+    return runner.run(char, engine=engine or "auto", profile=prof, mugen_root=s.get("mugen_dir") or None,
+                      ikemen_root=s.get("ikemen_dir") or None)
+
+
 # ======================================================================= referência
 
 @tool("How MUGEN works, topic by topic, to build any move by hand: states (header, triggers, ending "

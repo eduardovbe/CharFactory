@@ -111,6 +111,13 @@ class GuiHost(tools.Host):
                 ", ".join(PART_NAMES.get(p, p) for p in sorted(touched))))
         return res
 
+    def run_engine(self, prof, engine: str | None = None) -> dict:
+        """Ferramenta run_in_engine na janela: roda como o Ctrl+R (sem travar a interface)."""
+        r = self.win.run_mugen(engine, prof)
+        if not r:
+            raise tools.ToolError("the engine did not start (the app showed the reason to the user)")
+        return r
+
     def _view(self) -> dict:
         """O que o usuário está olhando agora (página, arquivo e linha, animação, sprite…)."""
         w = self.win
@@ -314,6 +321,12 @@ def _step_label(name: str, args: dict) -> str:
         "mugen_guide": lambda: tr("Read the guide: {0}").format(a.get("topic", "")),
         "mugen_reference": lambda: tr("Looked up {0} in the reference").format(a.get("name", "")),
         "simulate_state": lambda: tr("Simulated state {0}").format(n),
+        "inspect_images": lambda: tr("Looked at {0} image(s)").format(len(a.get("paths") or [])),
+        "import_sprites": lambda: tr("Imported {0} image(s) as sprites {1}").format(len(a.get("paths") or []), sprite),
+        "import_palette_from_image": lambda: tr("Took palette {0} from {1}").format(
+            a.get("slot", 1), Path(str(a.get("path", ""))).name),
+        "list_run_profiles": lambda: tr("Read the run profiles"),
+        "run_in_engine": lambda: tr("Ran the character in the engine ({0})").format(a.get("profile") or tr("active profile")),
     }
     try:
         return labels[name]()
@@ -458,9 +471,16 @@ class AssistantPanel(QWidget):
         lay.setSpacing(0)
         lay.addLayout(head)
         lay.addWidget(self.stack, 1)
+        # atalhos do que está na tela (explicar este estado, ajustar estas caixas…)
+        self.quick = QWidget()
+        self.quick_row = QHBoxLayout(self.quick)
+        self.quick_row.setContentsMargins(0, 0, 0, 0)
+        self.quick_row.setSpacing(4)
+        self.quick.hide()
         box = QVBoxLayout()
         box.setContentsMargins(10, 4, 10, 10)
         box.setSpacing(4)
+        box.addWidget(self.quick)
         box.addWidget(self.busy_label)
         box.addWidget(self.composer)
         lay.addLayout(box)
@@ -530,6 +550,40 @@ class AssistantPanel(QWidget):
     def _suggest(self, text: str) -> None:
         self.input.setPlainText(text)
         self.send_or_stop()
+
+    def ask(self, text: str) -> None:
+        """Pedido vindo de outra página: manda já, ou deixa no campo se uma resposta está em curso."""
+        self.input.setPlainText(text)
+        self.input.moveCursor(QTextCursor.MoveOperation.End)
+        if not self.busy():
+            self.send_or_stop()
+
+    @staticmethod
+    def quick_actions(kind: str | None) -> tuple[str, ...]:
+        """Atalhos para o que está na tela (mudam com a página)."""
+        return {
+            "code": (tr("Explain this state"), tr("Check this state for errors")),
+            "anim": (tr("Fit the collision boxes of this animation"), tr("Make this animation smoother")),
+            "sprite": (tr("Fit collision boxes to this sprite"), tr("Is the axis of this sprite right?")),
+            "sim": (tr("Fix the problems the simulator found"), tr("Make this move combo better")),
+        }.get(kind or "", ())
+
+    def _fill_quick(self) -> None:
+        kind = self.host._view().get("kind") if self.ctx.char is not None else None
+        if kind == getattr(self, "_quick_kind", object()):
+            return
+        self._quick_kind = kind
+        while self.quick_row.count():
+            w = self.quick_row.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        for text in self.quick_actions(kind):
+            b = QPushButton(text)
+            b.setObjectName("aiChip")
+            b.setToolTip(tr("Sends: {0}").format(text))
+            b.clicked.connect(lambda _=False, t=text: self._suggest(t))
+            self.quick_row.addWidget(b)
+        self.quick.setVisible(bool(self.quick_actions(kind)))
 
     def _colors(self) -> dict:
         # o fundo do código sai do painel (o do editor pode ser igual ao painel em temas claros)
@@ -608,6 +662,7 @@ class AssistantPanel(QWidget):
     def _refresh_context(self) -> None:
         if not self.isVisible():
             return
+        self._fill_quick()
         text = tr("Sees: {0}").format(self.host.view_label())
         width = max(40, self.context_label.width())
         self.context_label.setText(self.context_label.fontMetrics().elidedText(

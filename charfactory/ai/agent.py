@@ -28,7 +28,10 @@ SYSTEM = (
     "or command numbers). Each user message starts with an <editor> note from the editor (not typed "
     "by the user) saying which character is open, whether it has unsaved changes and what is on the "
     "screen. Use what is on the screen only when the user refers to it ('this move', 'this "
-    "animation', 'here'); otherwise ignore it and do not read it. " + tools.MOVE_RECIPE)
+    "animation', 'here'); otherwise ignore it and do not read it. " +
+    "To bring images in as sprites, call inspect_images and then import_sprites (indexed images keep "
+    "their embedded palette with mode embedded; big HD images need a scale). run_in_engine opens the "
+    "real engine with a run profile, only when the user asks to play or test in the engine. " + tools.MOVE_RECIPE)
 
 
 class Agent:

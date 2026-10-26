@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import io
 import struct
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +29,49 @@ _PNG_FORMATS = (FMT_PNG8, FMT_PNG24, FMT_PNG32)
 
 class SFFError(Exception):
     pass
+
+
+class ByteLRU:
+    """Cache LRU limitado pelo tamanho total (bytes) e seguro entre threads: o simulador desenha
+    numa thread e o editor lê na da interface. A chave é o id de um objeto que o valor também
+    guarda, então o id não é reaproveitado enquanto a entrada existe."""
+
+    def __init__(self, budget: int):
+        self.budget = budget
+        self.used = 0
+        self._d: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key, check=None):
+        with self._lock:
+            hit = self._d.get(key)
+            if hit is None or (check is not None and not check(hit[0])):
+                return None
+            self._d.move_to_end(key)
+            return hit[0]
+
+    def put(self, key, value, size: int) -> None:
+        if size > self.budget // 4:
+            return                      # um só item enorme não expulsa o resto
+        with self._lock:
+            old = self._d.pop(key, None)
+            if old is not None:
+                self.used -= old[1]
+            self._d[key] = (value, size)
+            self.used += size
+            while self.used > self.budget and self._d:
+                _, (_, sz) = self._d.popitem(last=False)
+                self.used -= sz
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self.used = 0
+
+
+# índices decodificados (RLE/LZ5/PNG8) por bloco de dados: decodificar a cada tick era o que
+# deixava o simulador e as prévias lentos (o LZ5 e o RLE5 são decodificados em Python)
+PIXELS = ByteLRU(192 * 1024 * 1024)
 
 
 @dataclass
@@ -88,11 +133,27 @@ class SFF:
         return ".".join(str(v) for v in self.version)
 
     def find(self, group: int, item: int) -> Sprite | None:
-        return next((s for s in self.sprites if s.group == group and s.item == item), None)
+        i = self.index_of(group, item)
+        return self.sprites[i] if i >= 0 else None
 
     def index_of(self, group: int, item: int) -> int:
-        return next((i for i, s in enumerate(self.sprites)
-                     if s.group == group and s.item == item), -1)
+        # índice (grupo, item) -> posição, conferido a cada consulta: a lista é editada direto
+        # em vários lugares (renumerar, trocar, apagar), e um índice velho é refeito na hora
+        idx = self.__dict__.get("_index")
+        sprites = self.sprites
+        if idx is not None and idx[0] is sprites:
+            i = idx[1].get((group, item))
+            if i is not None and i < len(sprites):
+                s = sprites[i]
+                if s.group == group and s.item == item:
+                    return i
+        i = next((k for k, s in enumerate(sprites) if s.group == group and s.item == item), -1)
+        if i >= 0 or idx is None or idx[0] is not sprites or idx[2] != len(sprites):
+            table: dict = {}
+            for k, s in enumerate(sprites):
+                table.setdefault((s.group, s.item), k)
+            self.__dict__["_index"] = (sprites, table, len(sprites))
+        return i
 
     def find_palette(self, group: int, item: int) -> int:
         return next((i for i, p in enumerate(self.palettes)
@@ -112,6 +173,15 @@ class SFF:
             return spr._image.tobytes()
         w, h, size = spr.width, spr.height, spr.width * spr.height
         body = spr._data
+        key = (id(body), spr.fmt, w, h)
+        hit = PIXELS.get(key, lambda v: v[0] is body)
+        if hit is not None:
+            return hit[1]
+        px = self._decode(spr, body, size)
+        PIXELS.put(key, (body, px), len(px) + 64)
+        return px
+
+    def _decode(self, spr: Sprite, body: bytes, size: int) -> bytes:
         if spr.fmt == FMT_PCX or spr.fmt == FMT_PNG8:
             img = Image.open(io.BytesIO(body if spr.fmt == FMT_PCX else body[4:]))
             if img.mode not in ("P", "L"):  # Pillow abre PCX de paleta cinza como 'L'
@@ -129,8 +199,13 @@ class SFF:
         if spr.is_truecolor:
             if spr._image is not None:
                 return spr._image.convert("RGBA")
-            img = Image.open(io.BytesIO(spr._data[4:]))
-            return img.convert("RGBA")
+            body = spr._data
+            hit = PIXELS.get(("rgba", id(body)), lambda v: v[0] is body)
+            if hit is None:
+                img = Image.open(io.BytesIO(body[4:])).convert("RGBA")
+                hit = (body, img)
+                PIXELS.put(("rgba", id(body)), hit, img.width * img.height * 4 + 64)
+            return hit[1].copy()        # quem recebe pode pintar por cima
         img = Image.frombytes("P", (spr.width, spr.height), self.pixels(spr))
         if isinstance(palette, int):
             palette = self.palettes[palette]

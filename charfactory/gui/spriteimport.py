@@ -1,7 +1,10 @@
 """Janela "Importar imagens": onde entram (grupo e índice, ou pelo nome do arquivo, de 1 em 1 ou
-de 10 em 10), o eixo (9 âncoras ou X/Y), que paleta usam (a do personagem, adaptar a uma do
-SFF, manter os índices trocando a paleta, uma própria feita das cores da imagem ou cores reais
-em PNG 32 bits), que cor é o fundo transparente, se sprites iguais viram link e uma prévia."""
+de 10 em 10), o tamanho (reduzir imagem HD), o eixo (9 âncoras ou X/Y), que paleta usam (a
+embutida na imagem, a do personagem, adaptar a uma do SFF, manter os índices trocando a
+paleta, uma própria feita das cores da imagem ou cores reais em PNG 32 bits), que cor é o
+fundo transparente, se sprites iguais viram link e uma prévia. A janela analisa as imagens e
+marca a opção de cores recomendada; imagem grande vira prévia reduzida e a importação roda
+fora da interface, sem travar."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,6 +25,7 @@ from .widgets import hint_label
 from ..i18n import tr
 
 PREVIEW = 300
+PREVIEW_PIXELS = 700_000      # acima disso a prévia converte uma cópia reduzida (só para ver)
 ANCHOR_GRID = (("tl", "t", "tr"), ("l", "c", "r"), ("bl", "b", "br"))
 
 
@@ -112,6 +116,9 @@ class ImportSpritesDialog(QDialog):
         self.char = ctx.char
         self.paths = list(paths)
         self.images = SI.open_images(self.paths)
+        self._sized: tuple | None = None          # (escala, suave, imagens) no tamanho pedido
+        self.infos = [SI.image_info(im) for im in self.images]
+        self.recommended, self.recommend_why = SI.recommend(self.images, self.char)
         self.result: dict | None = None
         self.setWindowTitle(tr("Import images"))
         self.setMinimumSize(1120, 720)
@@ -150,6 +157,31 @@ class ImportSpritesDialog(QDialog):
         wf.addRow(tr("Numbers"), steps)
         wf.addRow(self.where_note)
 
+        # ------------------------------------------------ tamanho
+        size_box = QGroupBox(tr("Size"))
+        sf = QFormLayout(size_box)
+        self.scale = QSpinBox()
+        self.scale.setRange(1, 800)
+        self.scale.setSuffix(" %")
+        self.scale.setValue(100)
+        self.scale.setToolTip(tr("Final size of the sprites: 100% keeps the image as it is"))
+        self.smooth = QCheckBox(tr("Smooth reduction (HD art; pixel art stays sharp without it)"))
+        self.smooth.setChecked(bool(saved.get("smooth", False)))
+        fit = QPushButton(tr("Fit to the character's height"))
+        fit.setToolTip(tr("Scales the image so its content is as tall as the character's standing sprite (0,0)"))
+        fit.clicked.connect(self._fit_height)
+        fit.setEnabled(self.char.sprites.find(0, 0) is not None)
+        row = QHBoxLayout()
+        row.addWidget(self.scale)
+        row.addWidget(fit)
+        row.addStretch()
+        sf.addRow(tr("Scale"), row)
+        sf.addRow(self.smooth)
+        self.size_note = QLabel()
+        self.size_note.setObjectName("dim")
+        self.size_note.setWordWrap(True)
+        sf.addRow(self.size_note)
+
         # ------------------------------------------------ eixo
         axis_box = QGroupBox(tr("Axis"))
         av = QHBoxLayout(axis_box)
@@ -184,8 +216,21 @@ class ImportSpritesDialog(QDialog):
         # ------------------------------------------------ cores
         colors = QGroupBox(tr("Colors"))
         cv = QVBoxLayout(colors)
+        self.detected = QLabel()
+        self.detected.setObjectName("infoChip")
+        self.detected.setWordWrap(True)
+        self.detected.setTextFormat(Qt.TextFormat.RichText)
+        cv.addWidget(self.detected)
         self.mode = QButtonGroup(self)
         has_char = self.char.sprites.find_palette(1, 1) >= 0
+        all_indexed = all(i["indexed"] for i in self.infos)
+        self.r_emb = QRadioButton(tr("Palette embedded in the image"))
+        self.r_emb.setEnabled(all_indexed)
+        self.r_emb.setToolTip(tr("Indexed PNG/PCX/GIF: keeps the image's own colors and indices exactly"))
+        self.emb_char = QCheckBox(tr("Make it the character palette (1,1)"))
+        self.emb_char.setChecked(bool(saved.get("as_char_palette", False)) and all_indexed)
+        self.emb_char.setToolTip(tr("The image palette replaces palette 1,1: every sprite drawn with 1,1 "
+                                    "takes these colors (use it for the first sprites of a new character)"))
         self.r_char = QRadioButton(tr("Character palette (1,1)"))
         self.r_char.setEnabled(has_char)
         self.r_pal = QRadioButton(tr("Adapt the image to the palette"))
@@ -212,8 +257,19 @@ class ImportSpritesDialog(QDialog):
         self.reversed = QCheckBox(tr("Reversed palette (the last color is the background)"))
         self.dither = QCheckBox(tr("Dithering (smooths gradients when the colors do not fit)"))
         self.dither.setChecked(bool(saved.get("dither", False)))
-        for k, r in enumerate((self.r_char, self.r_pal, self.r_swap, self.r_own, self.r_true)):
+        self.mode_buttons = {"char": self.r_char, "palette": self.r_pal, "swap": self.r_swap,
+                             "own": self.r_own, "truecolor": self.r_true, "embedded": self.r_emb}
+        for k, r in enumerate(self.mode_buttons.values()):
             self.mode.addButton(r, k)
+        rb = self.mode_buttons.get(self.recommended)
+        if rb is not None:
+            rb.setText(rb.text() + tr("  (recommended)"))
+            rb.setToolTip((rb.toolTip() + "\n" if rb.toolTip() else "") + self.recommend_why)
+        cv.addWidget(self.r_emb)
+        emb = QVBoxLayout()
+        emb.setContentsMargins(22, 0, 0, 0)
+        emb.addWidget(self.emb_char)
+        cv.addLayout(emb)
         cv.addWidget(self.r_char)
         cv.addWidget(hint_label(tr("Changes with the player's 12 palettes: for the character's body.")))
         pal_row = QHBoxLayout()
@@ -247,11 +303,19 @@ class ImportSpritesDialog(QDialog):
                                    "the player's palettes do not change these sprites.")))
         cv.addWidget(self.reversed)
         cv.addWidget(self.dither)
-        mode = saved.get("mode", "char" if has_char else "own")
-        {"char": self.r_char, "palette": self.r_pal, "swap": self.r_swap, "own": self.r_own,
-         "truecolor": self.r_true}.get(mode, self.r_own).setChecked(True)
-        if not has_char and self.r_char.isChecked():
-            self.r_own.setChecked(True)
+        # começa no recomendado para estas imagens (a análise vale mais que a última escolha)
+        mode = self.recommended if self.recommended in self.mode_buttons else saved.get("mode", "own")
+        if mode == "char" and not has_char:
+            mode = "own"
+        if mode == "palette" or mode == "swap":
+            i = self.pal_combo.findData(tuple(saved.get("palette") or (1, 1)))
+            self.pal_combo.setCurrentIndex(max(0, i))
+        self.mode_buttons.get(mode, self.r_own).setChecked(True)
+        if self.recommended == "char" and all_indexed:
+            # já está nos índices da paleta do personagem: troca a paleta sem reconverter
+            self.mode_buttons["swap"].setChecked(True)
+            self.pal_combo.setCurrentIndex(max(0, self.pal_combo.findData((1, 1))))
+            self.recommended = "swap"
 
         # ------------------------------------------------ fundo, recorte e iguais
         bgbox = QGroupBox(tr("Transparent background (index 0)"))
@@ -284,6 +348,7 @@ class ImportSpritesDialog(QDialog):
         left = QVBoxLayout(left_w)
         left.setContentsMargins(0, 0, 6, 0)
         left.addWidget(where_box)
+        left.addWidget(size_box)
         left.addWidget(colors)
         left.addWidget(bgbox)
         left.addWidget(self.autocrop)
@@ -314,10 +379,14 @@ class ImportSpritesDialog(QDialog):
         self.info = QLabel()
         self.info.setWordWrap(True)
         self.info.setObjectName("infoChip")
+        self.reduced = QLabel(tr("Large image: the preview is reduced; the import uses every pixel."))
+        self.reduced.setObjectName("dim")
+        self.reduced.hide()
         self.strip = QLabel()
         right = QVBoxLayout()
         right.addWidget(self.which)
         right.addLayout(pics)
+        right.addWidget(self.reduced)
         right.addWidget(axis_box)
         right.addWidget(self.info)
         right.addWidget(QLabel(tr("Palette used (the outlined color is the background):")))
@@ -330,15 +399,18 @@ class ImportSpritesDialog(QDialog):
         body.addLayout(right, 6)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Import"))
+        self.buttons = bb
         bb.accepted.connect(self.do_import)
         bb.rejected.connect(self.reject)
         lay = QVBoxLayout(self)
         lay.addLayout(body, 1)
         lay.addWidget(bb)
 
-        for w in (self.r_char, self.r_pal, self.r_swap, self.r_own, self.r_true, self.own_shared, self.own_reuse,
-                  self.own_auto, self.reversed, self.dither):
+        for w in (self.r_char, self.r_pal, self.r_swap, self.r_own, self.r_true, self.r_emb, self.own_shared,
+                  self.own_reuse, self.own_auto, self.reversed, self.dither, self.emb_char):
             w.toggled.connect(self.update_preview)
+        self.smooth.toggled.connect(self._resized)
+        self.scale.valueChanged.connect(self._resized)
         for w in (self.pal_combo, self.trans, self.which, self.autocrop):
             w.currentIndexChanged.connect(self.update_preview)
         for w in (self.own_colors, self.own_g, self.own_i):
@@ -347,15 +419,22 @@ class ImportSpritesDialog(QDialog):
             w.valueChanged.connect(self._where)
         for w in (self.from_name, self.step1, self.step10):
             w.toggled.connect(self._where)
-        self.which.currentIndexChanged.connect(lambda _: self._set_anchor(self.anchor))
+        self.which.currentIndexChanged.connect(lambda _: (self._describe(), self._set_anchor(self.anchor)))
+        self._describe()
+        big = max(max(i["size"]) for i in self.infos)
+        if big > SI.BIG_SIDE and self.char.sprites.find(0, 0) is not None:
+            self._fit_height(quiet=True)       # foto/arte HD: já sugere o tamanho do char
         self._set_anchor(self.anchor)
         self._where()
         self.update_preview()
 
     # ------------------------------------------------------------ opções
 
+    def mode_name(self) -> str:
+        return next((m for m, b in self.mode_buttons.items() if b.isChecked()), "own")
+
     def options(self) -> SI.ImportOptions:
-        mode = ["char", "palette", "swap", "own", "truecolor"][max(0, self.mode.checkedId())]
+        mode = self.mode_name()
         return SI.ImportOptions(
             mode=mode, palette=self.pal_combo.currentData(), shared=self.own_shared.isChecked(),
             colors=self.own_colors.value(), reuse=self.own_reuse.isChecked(),
@@ -364,10 +443,64 @@ class ImportSpritesDialog(QDialog):
             trans=self.trans.currentData(), trans_color=self.trans_color,
             autocrop=bool(self.autocrop.currentData()), from_name=self.from_name.isChecked(),
             step=10 if self.step10.isChecked() else 1, anchor=self.anchor,
-            axis=(self.ax.value(), self.ay.value()), share=self.share.currentData() != "no")
+            axis=(self.ax.value(), self.ay.value()), share=self.share.currentData() != "no",
+            scale=self.scale.value() / 100, smooth=self.smooth.isChecked(),
+            as_char_palette=self.emb_char.isChecked())
+
+    def sized(self) -> list[Image.Image]:
+        """As imagens no tamanho pedido (guardadas: reduzir uma foto grande leva um instante)."""
+        k, sm = self.scale.value() / 100, self.smooth.isChecked()
+        if self._sized is None or self._sized[:2] != (k, sm):
+            opts = SI.ImportOptions(scale=k, smooth=sm)
+            self._sized = (k, sm, [SI.scale_image(im, opts) for im in self.images])
+        return self._sized[2]
 
     def _current(self) -> Image.Image:
-        return self.images[max(0, self.which.currentIndex())]
+        return self.sized()[max(0, self.which.currentIndex())]
+
+    def _resized(self, *_) -> None:
+        self._set_anchor(self.anchor) if self.anchor in SI.ANCHORS else self.update_preview()
+
+    def _content_height(self, im: Image.Image) -> int:
+        mask, _ = SI.background(im, self.options())
+        box = SI._crop(im, mask)
+        return (box[3] - box[1]) if box else im.height
+
+    def _fit_height(self, quiet: bool = False) -> None:
+        """Escala para o conteúdo da imagem ficar da altura do sprite parado (0,0) do char."""
+        ref = self.char.sprites.find(0, 0)
+        if ref is None:
+            return
+        im = self.images[max(0, self.which.currentIndex())]
+        h = self._content_height(im)
+        pct = max(1, min(800, round(100 * ref.height / max(1, h))))
+        if quiet and pct >= 100:
+            return
+        self.scale.setValue(pct)
+
+    def _describe(self) -> None:
+        """O que a imagem é (tamanho, paleta embutida, cores) e a escolha recomendada."""
+        info = self.infos[max(0, self.which.currentIndex())]
+        w, h = info["size"]
+        kind = Path(self.paths[max(0, self.which.currentIndex())]).suffix.lstrip(".").upper() or tr("image")
+        parts = [f"<b>{kind}</b> {w}×{h}"]
+        if info["indexed"]:
+            parts.append(tr("indexed, with its own palette of {0} colors (uses {1})").format(
+                info["palette_size"], info["used"]))
+        else:
+            parts.append(tr("true colors · {0} colors").format(f"{info['colors']:,}".replace(",", ".")))
+        if info["alpha"]:
+            parts.append(tr("transparent background"))
+        text = " · ".join(parts)
+        if self.recommend_why:
+            text += "<br>" + tr("Recommended: {0}").format(self.recommend_why)
+        self.detected.setText(text)
+        if info["big"]:
+            self.size_note.setText(tr("Large image ({0}×{1}). Characters are usually 60–250 px tall: "
+                                      "reduce it here so the game and the editor stay fast.").format(w, h))
+        else:
+            self.size_note.setText("")
+        self.size_note.setVisible(bool(self.size_note.text()))
 
     def _set_anchor(self, key: str) -> None:
         """Âncora escolhida: o X/Y mostra onde ela cai na imagem da prévia."""
@@ -427,12 +560,24 @@ class ImportSpritesDialog(QDialog):
             w.setEnabled(opts.mode == "own" and not self.own_auto.isChecked())
         self.dither.setEnabled(opts.mode in ("char", "palette", "own"))
         self.reversed.setEnabled(any(im.mode == "P" for im in self.images) and opts.mode != "truecolor")
-        im = self._current()
-        ax, ay = SI.axis_for(im.width, im.height, opts)
+        self.emb_char.setEnabled(opts.mode == "embedded")
+        full = self._current()
+        ax, ay = SI.axis_for(full.width, full.height, opts)
+        # imagem grande: converte uma cópia reduzida só para a prévia (a de verdade usa tudo)
+        f = min(1.0, (PREVIEW_PIXELS / max(1, full.width * full.height)) ** 0.5)
+        self.reduced.setVisible(f < 1)
+        im = full if f >= 1 else full.resize((max(1, int(full.width * f)), max(1, int(full.height * f))),
+                                             Image.Resampling.NEAREST)
+        if f < 1:
+            ax, ay = ax * f, ay * f
         self.before.setPixmap(_pixmap(im, (ax, ay)))
         try:
-            imgs = self.images if opts.mode == "own" and opts.shared else [im]
-            conv = SI.convert(imgs, self.char, opts)[k if len(imgs) > 1 else 0]
+            many = opts.mode == "own" and opts.shared and len(self.images) > 1
+            imgs = [im] + ([x for j, x in enumerate(self.sized()) if j != k] if many else [])
+            if f < 1 and many:      # o lote todo entra na paleta, também reduzido
+                imgs = [im] + [x.resize((max(1, int(x.width * f)), max(1, int(x.height * f))), Image.Resampling.NEAREST)
+                               for x in imgs[1:]]
+            conv = SI.convert(imgs, self.char, opts)[0]
         except ValueError as e:
             self.info.setText(str(e))
             self.after.clear()
@@ -447,6 +592,8 @@ class ImportSpritesDialog(QDialog):
                 ax, ay = ax - box[0], ay - box[1]
         self.after.setPixmap(_pixmap(shown_img, (ax, ay)))
         mask, bg = SI.background(SI.reverse_palette(im) if opts.reversed else im, opts)
+        if opts.mode == "embedded" and opts.as_char_palette:
+            self.info.setText(tr("The image palette replaces 1,1: every sprite that uses 1,1 changes color"))
         # o quadradinho mostra a cor que vai virar o fundo (a detectada, ou a escolhida)
         shown = tuple(opts.trans_color) if opts.trans == "color" else bg
         self.color_btn.setStyleSheet(f"background: rgb{tuple(shown)};" if shown else "")
@@ -454,7 +601,11 @@ class ImportSpritesDialog(QDialog):
             "#%02x%02x%02x" % tuple(shown)) if shown else tr("Background from the image transparency (alpha)"))
         n = SI.count_colors(im, mask)
         msg = tr("{0} colors in the image (without the background)").format(n)
-        if opts.mode == "truecolor":
+        if opts.mode == "embedded":
+            msg += tr(" · indices and colors kept exactly")
+            if opts.as_char_palette:
+                msg += tr(" · <b>replaces palette 1,1</b>: every sprite that uses it changes color")
+        elif opts.mode == "truecolor":
             msg += tr(" · kept as they are")
         elif opts.mode == "own":
             msg += tr(" · fits in one palette") if n <= opts.colors else \
@@ -482,18 +633,42 @@ class ImportSpritesDialog(QDialog):
             "mode": opts.mode, "shared": opts.shared, "colors": opts.colors, "reuse": opts.reuse,
             "dither": opts.dither, "trans": opts.trans, "trans_color": list(opts.trans_color or ()),
             "autocrop": opts.autocrop, "from_name": opts.from_name, "step": opts.step,
-            "anchor": opts.anchor if opts.anchor in SI.ANCHORS else "b", "share": self.share.currentData()}
+            "anchor": opts.anchor if opts.anchor in SI.ANCHORS else "b", "share": self.share.currentData(),
+            "smooth": opts.smooth, "as_char_palette": opts.as_char_palette,
+            "palette": list(opts.palette) if opts.palette else None}
         if self.share.currentData() == "ask":
             opts.share = QMessageBox.question(
                 self, tr("Share identical sprites"),
                 tr("If an image is equal to a sprite that already exists, make it a link to that sprite?")) \
                 == QMessageBox.StandardButton.Yes
-        try:
-            self.result = SI.import_images(self.char, self.paths, self.group.value(), self.item.value(), opts)
-        except ValueError as e:
-            self.info.setText(str(e))
-            return
+        if sum(im.width * im.height for im in self.sized()) < 2_000_000:
+            try:
+                self.result = SI.import_images(self.char, self.paths, self.group.value(), self.item.value(), opts)
+            except ValueError as e:
+                self.info.setText(str(e))
+                return
+            return self.accept()
+        # imagem grande: converte fora da interface (a janela continua respondendo)
+        from .editors.simulator import Job, start
+        char, paths, g, i = self.char, list(self.paths), self.group.value(), self.item.value()
+        self.setEnabled(False)
+        self.setCursor(Qt.CursorShape.BusyCursor)
+        self.info.setText(tr("Importing… (large image, a few seconds)"))
+        job = Job(lambda: SI.import_images(char, paths, g, i, opts))
+        job.signals.done.connect(self._imported)
+        job.signals.failed.connect(self._import_failed)
+        start(job, self, priority=2)
+
+    def _imported(self, result) -> None:
+        self.result = result
+        self.unsetCursor()
+        self.setEnabled(True)
         self.accept()
+
+    def _import_failed(self, msg: str) -> None:
+        self.unsetCursor()
+        self.setEnabled(True)
+        self.info.setText(msg.splitlines()[0].split(": ", 1)[-1])
 
 
 def ask_images(parent, many: bool = True) -> list[str]:
