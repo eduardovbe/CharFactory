@@ -7,21 +7,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-26
+
 ### Added
 
-- Run profiles (Debug › Run profiles, Ctrl+Shift+R): opponent, stage, AI, palette, life and power per side, rounds, time and Ikemen GO options; the arrow next to Run picks one.
+- Run profiles (Debug › Run profiles, Ctrl+Shift+R): opponent, stage, AI, palette, life, power, rounds and time.
 - `charfactory run --profile NAME` uses the profiles saved in the app.
-- Import images: palette embedded in the image (optionally as palette 1,1), recommended mode, scale and "fit to the character's height".
-- Palettes: import a palette from an image (PNG, PCX, GIF, BMP) besides .act.
-- AI: tools to inspect and import images, take a palette from an image, list run profiles and run in the engine.
-- AI: quick actions for what is on screen and "Ask the AI to fix this move" in the simulator.
+- Run in MUGEN or Ikemen GO with the unsaved edits, without saving.
+- Sprites: drag the sprite to align it (Shift locks the direction).
+- Stage background in sprites and animations: simple stage, a MUGEN stage or a PNG.
+- Timeline: drag a frame edge to change its time, Shift+drag to stretch the whole animation, drag a frame to reorder it, right-click for more.
+- States: parameter window for every controller, with defaults, options and what each one does (Ctrl+Shift+Space).
+- Parameter descriptions in Portuguese and Spanish, and the Ikemen GO parameters explained.
+- Code: find bar with Ctrl+F (regex, replace); Ctrl+Shift+G goes to a statedef, command or animation.
+- 12 palettes step by step: pick what changes, styles and intensity, then choose among the ideas.
+- New palette styles: light and dark clothes, tones of one color, complementary, metals, nature and fighting game classics.
+- Simulator: damage of the move, power gained and P2 life tick by tick.
+- Import images: palette embedded in the image, recommended mode, scale and "fit to the character's height".
+- Palettes: import a palette from an image (PNG, PCX, GIF, BMP).
+- AI: tools for images, palettes and run profiles, quick actions and "Ask the AI to fix this move".
 
 ### Fixed
 
-- Simulator: ticks draw several times faster (sprites are decoded once), the first tick shows before the effect audit, and big zoomed or rotated sprites no longer vanish.
+- Simulator draws ticks several times faster and big zoomed or rotated sprites no longer vanish.
 - A tick that fails to draw shows the error instead of stalling playback.
-- The animation preview next to States draws in the background instead of freezing the window.
-- Importing or editing a very large image no longer freezes the program (minutes to seconds).
+- The animation preview next to States no longer freezes the window.
+- Importing or editing a very large image no longer freezes the program.
+- Helper and Explod were shown as deprecated.
+- Generating palettes keeps the old ones (moved to 13 and up) and the sprites that use them.
+- Light and black clothes no longer stay the same in every generated palette.
+- Cleaner side panels in animations, sprites, sounds and the simulator.
 
 ## [0.3.0] - 2026-10-21
 
@@ -231,7 +246,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/eduardovbe/CharFactory/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/eduardovbe/CharFactory/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/eduardovbe/CharFactory/compare/v0.2.0...v0.2.5
 [0.2.0]: https://github.com/eduardovbe/CharFactory/compare/v0.1.0...v0.2.0
