@@ -411,11 +411,12 @@ class ControllerDialog(QDialog):
         spec = self.spec()
         if name is None or name not in self.rows:
             req = ", ".join(spec.get("required", [])) or tr("none besides the trigger")
+            how = tr("Click a parameter (or its ?) to see what it does. Typing a value checks "
+                     "it; the checked ones go into the code.")
             self.help.setHtml(
                 f"<h3>{esc(spec.get('name', ''))}</h3><p>{esc(sctrldocs.doc(spec.get('description', '')))}</p>"
                 f"<p><b>{tr('Required:')}</b> {esc(req)}</p>"
-                f"<p style='color:{dim}'>{tr('Click a parameter (or its ?) to see what it does. Typing a value checks '
-                                            'it; the checked ones go into the code.')}</p>")
+                f"<p style='color:{dim}'>{how}</p>")
             return
         p = self.rows[name]["spec"]
         parts = [f"<h3>{esc(name)}</h3>"]
