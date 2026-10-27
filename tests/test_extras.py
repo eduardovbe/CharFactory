@@ -352,3 +352,68 @@ def test_palettes12_themes_and_surprise_change_more(mugen_dir, tmp_path):
         assert any(pals[n][i] != base[i] for n in pals for i in rngs[j]["indices"])
     a = P.scheme("sortear", rngs, seed=1)
     assert a == P.scheme("sortear", rngs, seed=1) and a != P.scheme("sortear", rngs, seed=2)
+    # conjuntos prontos: um por esquema e três do Surpresa, cada um com as paletas 2 a 12
+    sets = P.candidate_sets(rngs)
+    assert len(sets) == len(P.SCHEMES) + 2 and all(sorted(x["adj"]) == list(range(2, 13)) for x in sets)
+    tones = next(x for x in sets if x["key"] == "tons")
+    big = max((j for j in free), key=lambda j: len(rngs[j]["indices"]))
+    firsts = {P.adjust(base, rngs, tones["adj"][n])[rngs[big]["indices"][0]] for n in range(2, 13)}
+    assert len(firsts) == 11                                  # uma cor diferente em cada paleta
+    # claro e escuro: a parte que mais aparece vira branca ou preta de verdade (não só gira a cor)
+    counts = P.index_counts(c)
+    rngs2 = P.refine_dark(c, P.ranges(base, P.used_indices(c), counts), base, counts)
+    main = max((j for j, r in enumerate(rngs2) if not r["locked"]), key=lambda j: rngs2[j]["pixels"])
+    ld = P.scheme("claro_escuro", rngs2)
+    light = lambda n: sum(P._hls(P.adjust(base, rngs2, ld[n])[i])[1] for i in rngs2[main]["indices"]) / len(rngs2[main]["indices"])
+    assert light(2) > 0.6 and light(4) < 0.3                  # 2 = branco, 4 = preto
+    # a mistura alterna os estilos escolhidos; a intensidade muda a saturação
+    mix = P.candidate_sets(rngs2, styles=("classico", "claro_escuro"))
+    assert mix[0]["key"] == "mistura" and mix[0]["adj"][2] == mix[1]["adj"][2] and mix[0]["adj"][3] == mix[2]["adj"][2]
+    soft = P.scheme("classico", rngs2, strength=0.6)[2]
+    vivid = P.scheme("classico", rngs2, strength=1.4)[2]
+    assert all(vivid[j][1] >= soft[j][1] for j in soft)
+
+
+def test_palettes12_relocate_keeps_the_sprites_that_use_the_palette(mugen_dir, tmp_path):
+    """Gerar por cima da 1,n de um efeito: a paleta antiga vai para 1,13+ e o sprite que a usa
+    continua com as mesmas cores, também depois de gravar e abrir de novo."""
+    import shutil
+    from charfactory import project
+    from charfactory.tools import palettes12 as P
+    shutil.copytree(mugen_dir / "chars" / "kfm", tmp_path / "kfm")
+    c = project.load(tmp_path / "kfm" / "kfm.def", mugen_dir)
+    s = c.sprites
+    spr = s.sprites[-1]
+    spr.palette_index = s.find_palette(1, 2)
+    look = s.image(spr).tobytes()
+    old2 = list(s.palettes[s.find_palette(1, 2)].colors)
+    assert P.sprite_users(c, 2) == 1 and P.sprite_users(c, 9) == 0
+    moved = P.relocate(c, range(2, 13))
+    assert moved == {n: n + 11 for n in range(2, 7)}
+    P.write(c, {n: [(n, n, n)] * 256 for n in range(2, 13)})
+    assert s.image(spr).tobytes() == look
+    c.save(backup=False)
+    c2 = project.load(tmp_path / "kfm" / "kfm.def", mugen_dir)
+    s2 = c2.sprites
+    assert s2.palettes[s2.find_palette(1, 13)].colors[:len(old2)] == old2
+    assert s2.image(s2.sprites[-1]).tobytes() == look
+
+
+def test_simulator_reports_damage_power_and_p2_life(mugen_dir):
+    """Dano do golpe no simulador: cada acerto com o dano do HitDef (vezes o attack do char), a
+    energia ganha, a vida que sobra ao P2 tick a tick, e na defesa só o dano de defesa."""
+    from charfactory import project
+    from charfactory.tools import simulate
+    c = project.load(mugen_dir / "chars" / "kfm" / "kfm.def", mugen_dir)
+    sim = simulate.simulate(c, 200)
+    r = simulate.damage_report(sim)
+    hit = r["rows"][0]
+    assert r["hits"] == 1 and hit["dealt"] == hit["damage"] > 0       # attack 100 no kfm
+    assert r["total"] == hit["dealt"] and r["life"] == 1000 - r["total"]
+    assert hit["p1power"] == round(hit["damage"] * 0.7) and hit["attr"].replace(" ", "") == "S,NA"
+    assert simulate.life_at(sim, hit["t"] - 1) == 1000 and simulate.life_at(sim, hit["t"]) == r["life"]
+    super_ = simulate.damage_report(simulate.simulate(c, 3000))
+    assert super_["hits"] >= 3 and super_["p1power"] == 0                # o super tem getpower = 0
+    guarded = simulate.damage_report(simulate.simulate(c, 200, p2_guard=True))
+    assert guarded["guards"] == 1 and guarded["total"] == guarded["rows"][0]["dealt"]
+    assert guarded["rows"][0]["p1power"] == hit["p1power"] // 2

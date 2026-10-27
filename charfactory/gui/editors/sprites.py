@@ -116,7 +116,7 @@ class SpriteEditor(QWidget):
         self.usage.linkActivated.connect(lambda n: self.ctx.request_definition.emit("anim", int(n), 0))
 
         # onion skin: o sprite anterior ou um escolhido, com opacidade
-        self.onion = QCheckBox(tr("Show onion skin"))
+        self.onion = QCheckBox(tr("Show"))
         self.onion.toggled.connect(lambda _: self.refresh())
         self.onion_mode = QComboBox()
         self.onion_mode.addItems([tr("previous sprite"), tr("chosen sprite")])
@@ -125,7 +125,7 @@ class SpriteEditor(QWidget):
         self.onion_gi.setEnabled(False)
         self.onion_gi.changed.connect(lambda *_: self.refresh())
         self.onion_mode.currentIndexChanged.connect(
-            lambda i: (self.onion_gi.setEnabled(i == 1), self.refresh()))
+            lambda i: (self.onion_gi.setEnabled(i == 1), self.onion_gi.setVisible(i == 1), self.refresh()))
         self.onion_opacity = QSlider(Qt.Orientation.Horizontal)
         self.onion_opacity.setRange(10, 90)
         self.onion_opacity.setValue(35)
@@ -162,15 +162,20 @@ class SpriteEditor(QWidget):
         ])
         self.info.setObjectName("infoChip")
         sprite_sec = Section(tr("Sprite"), "sprites.sprite")
-        sprite_sec.add(self.gi, self.axis, self.info, self.usage, self.pick, self.show_trans)
+        sprite_sec.add(self.gi, self.axis, self.info, self.usage, self.pick, self.show_trans,
+                       hint_label(tr("Drag the sprite to align it (Shift locks the direction; arrows: 1 px, "
+                                     "Shift: 10).")))
         onion_sec = Section(tr("Onion skin"), "sprites.onion", collapsed=True)
-        onion_sec.add(self.onion, form_row(tr("Show"), self.onion_mode), self.onion_gi,
-                      form_row(tr("Opacity"), self.onion_opacity))
+        onion_row = QHBoxLayout()
+        onion_row.addWidget(self.onion)
+        onion_row.addWidget(self.onion_mode, 1)
+        self.onion_gi.hide()
+        onion_sec.add(onion_row, self.onion_gi, form_row(tr("Opacity"), self.onion_opacity))
         batch_sec = Section(tr("Batch and transform"), "sprites.batch")
         row = QHBoxLayout()
         row.setSpacing(12)
         row.addWidget(align_box)
-        hint = hint_label(tr("Align the axis to one of the sprite's 9 anchors (bottom center puts the axis at the feet)."))
+        hint = hint_label(tr("Axis at an anchor (bottom center = feet)."))
         row.addWidget(hint, 1)
         batch_sec.add(form_row(tr("Act on"), self.scope), row, self.transform_bar)
         left_content = QWidget()
@@ -187,7 +192,8 @@ class SpriteEditor(QWidget):
         self.canvas = SpriteCanvas()
         self.canvas.center_image = True
         self.canvas.axisPicked.connect(self.on_axis_picked)
-        self.canvas.drag_image = True          # Ctrl+arrastar move a figura em relação ao eixo
+        self.canvas.drag_image = True          # arrastar a figura (ou Ctrl+arrastar) a move em relação ao eixo
+        self.canvas.drag_image_plain = True    # como no FFS: sem Ctrl; arrastar o vazio move a vista
         self.canvas.imageDragged.connect(self.on_image_drag)
         self.canvas.doubleClicked.connect(self.edit_image)
         self.canvas.nudged.connect(lambda dx, dy: self.current() and self.on_axis(
@@ -287,6 +293,14 @@ class SpriteEditor(QWidget):
         ctx.modelChanged.connect(lambda part: part == "sprites" and QTimer.singleShot(0, lambda: self.load(keep=True)))
         self.on_theme()
         self._show_pal_scope()
+
+    def set_backdrop(self, bg: dict | None) -> None:
+        """Com fundo, o eixo fica no chão do stage; sem, o sprite aparece centralizado."""
+        centered = bg is None
+        self.canvas.set_backdrop(bg)
+        if self.canvas.center_image != centered:
+            self.canvas.center_image = centered
+            self.canvas.fit()
 
     def on_theme(self) -> None:
         self.canvas.set_theme(self.ctx.theme)
@@ -389,7 +403,10 @@ class SpriteEditor(QWidget):
 
     def show_index(self, _=None) -> None:
         self.refresh()
-        self.canvas.fit()
+        if self.canvas.center_image:
+            self.canvas.fit()
+        # com fundo de stage o eixo fica parado no chão (como no FFS): trocar de sprite não mexe
+        # na vista, e dá para comparar a posição de um sprite com a do outro
         if self.org_box.isVisible() and self.nav.index() < self.organizer.count():
             self._quiet = True
             self.organizer.setCurrentRow(self.nav.index(), QItemSelectionModel.SelectionFlag.NoUpdate)

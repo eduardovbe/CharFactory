@@ -819,26 +819,62 @@ class GroupIndex(QWidget):
 
 
 class Timeline(QWidget):
-    """Régua de ticks com os frames da animação, o frame atual e o cursor de reprodução."""
+    """Régua de ticks com os frames da animação, o frame atual e o cursor de reprodução. Como num editor de vídeo: arrastar a borda direita de um frame muda o
+    tempo dele, Shift+arrastar estica ou comprime a animação inteira, arrastar o meio do frame
+    muda a ordem e o clique direito abre o menu do frame."""
     tickClicked = Signal(int)
+    retimed = Signal(list)      # novos tempos de todos os frames (ao soltar o mouse)
+    frameMoved = Signal(int, int)             # frame de origem, posição nova
+    menuRequested = Signal(int, int, QPoint)  # frame, tick dentro dele, posição global do clique
     LEFT = 132
+    EDGE = 5                    # px de cada lado da borda que pegam o arrasto
+    MOVE_START = 6              # px de arrasto até virar "mudar a ordem"
 
     def __init__(self):
         super().__init__()
-        self.durations: list[int] = []
+        self.times: list[int] = []       # tempos como estão na AIR (-1 = infinito)
+        self.durations: list[int] = []   # o que se desenha (infinito vira 60, 0 vira 1)
         self.current_tick = 0
         self.current_frame = -1
         self.title = ""
         self.loopstart = 0
         self.theme = None
+        self._drag: dict | None = None
+        self._move: dict | None = None            # arrasto do meio de um frame (mudar a ordem)
         self.setFixedHeight(72)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tr("Click to go to a tick. Drag the right edge of a frame to change its time "
+                           "(Shift+drag stretches or compresses the whole animation); drag the middle of a "
+                           "frame to change the order; right-click for more. Esc cancels."))
 
     def set_frames(self, durations: list[int], loopstart: int, title: str) -> None:
+        self.times = list(durations)
         self.durations = [max(1, d) if d >= 0 else 60 for d in durations]
         self.loopstart = loopstart
         self.title = title
+        self._drag = self._move = None
         self.update()
+
+    def frame_at(self, x: float) -> tuple[int, int]:
+        """(frame, tick dentro dele) sob a coordenada x; (-1, 0) fora dos frames."""
+        t = (x - self.LEFT) / self._scale()
+        acc = 0
+        for i, d in enumerate(self.durations):
+            if acc <= t < acc + d:
+                return i, int(t - acc)
+            acc += d
+        return -1, 0
+
+    def _drop_index(self, x: float) -> int:
+        """Posição em que o frame arrastado entra: antes do frame cujo meio fica à direita de x."""
+        scale, acc = self._scale(), 0
+        for i, d in enumerate(self.durations):
+            if x < self.LEFT + (acc + d / 2) * scale:
+                return i
+            acc += d
+        return len(self.durations)
 
     def set_current_frame(self, i: int) -> None:
         if i != self.current_frame:
@@ -850,6 +886,36 @@ class Timeline(QWidget):
 
     def _ui(self, key: str, fallback: str) -> QColor:
         return QColor(self.theme.ui[key] if self.theme else fallback)
+
+    def _scale(self) -> float:
+        """Pixels por tick; durante o arrasto fica parado para a borda seguir o mouse."""
+        if self._drag:
+            return self._drag["scale"]
+        return (self.width() - self.LEFT - 12) / max(1, sum(self.durations))
+
+    def _edge_at(self, x: float) -> int:
+        """Índice do frame cuja borda direita está sob x (ou -1)."""
+        scale, acc = self._scale(), 0
+        for i, d in enumerate(self.durations):
+            acc += d
+            if abs(self.LEFT + acc * scale - x) <= self.EDGE:
+                return i
+        return -1
+
+    @staticmethod
+    def stretch(times: list[int], factor: float) -> list[int]:
+        """Multiplica os tempos pelo fator, arredondando sem acumular erro (total ≈ total × fator).
+        Infinito (-1) e 0 ficam como estão."""
+        out, carry = [], 0.0
+        for t in times:
+            if t <= 0:
+                out.append(t)
+                continue
+            want = t * factor + carry
+            n = max(1, round(want))
+            carry = want - n
+            out.append(n)
+        return out
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -879,9 +945,9 @@ class Timeline(QWidget):
             n_frames = len(self.durations)
             p.drawText(QRect(12, 48, left - 28, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        f"{n_frames} frames · {sum(self.durations)} t")
+        p.setClipRect(QRect(left - 7, 0, self.width() - left + 7, self.height()))
         total = max(1, sum(self.durations))
-        w = self.width() - left - 12
-        scale = w / total
+        scale = self._scale()
         # régua: um rótulo a cada 'step' ticks, sem sobrepor números
         small = QFont(p.font().family(), 7)
         p.setFont(small)
@@ -896,38 +962,145 @@ class Timeline(QWidget):
             x = int(left + t * scale)
             p.drawLine(x, 4, x, 9)
             p.drawText(x + 3, 13, str(t))
-        # frames
+        # frames: número no meio e o tempo embaixo quando cabem
         acc = 0
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         top, h = 22, self.height() - 30
+        dragged = self._drag["frames"] if self._drag else set()
+        moving = self._move["index"] if self._move and self._move["active"] else -1
         for i, d in enumerate(self.durations):
             x0, x1 = left + acc * scale, left + (acc + d) * scale
             c = QColor(accent)
             cur = i == self.current_frame
             c.setAlpha(235 if cur else (150 if i % 2 else 90))
-            p.setPen(QPen(text, 1.5) if cur else Qt.PenStyle.NoPen)
+            p.setOpacity(0.35 if i == moving else 1.0)
+            p.setPen(QPen(text, 1.5) if cur or i in dragged else Qt.PenStyle.NoPen)
             p.setBrush(c)
             bw = max(2, int(x1 - x0) - 2)
             p.drawRoundedRect(int(x0) + 1, top, bw, h, 4, 4)
             label = str(i + 1)
+            fg = self._ui("accent_text", "#fff") if cur else text
             if bw > fm.horizontalAdvance(label) + 6:
-                p.setPen(self._ui("accent_text", "#fff") if cur else text)
-                p.drawText(QRect(int(x0) + 1, top, bw, h), Qt.AlignmentFlag.AlignCenter, label)
+                p.setPen(fg)
+                p.drawText(QRect(int(x0) + 1, top, bw, h - 12), Qt.AlignmentFlag.AlignCenter, label)
+            t = self.times[i] if i < len(self.times) else d
+            tl = "∞" if t < 0 else f"{t}t"
+            if bw > fm.horizontalAdvance(tl) + 6:
+                p.setPen(fg if cur else dim)
+                p.drawText(QRect(int(x0) + 1, top + h - 15, bw, 14), Qt.AlignmentFlag.AlignCenter, tl)
+            p.setOpacity(1.0)
             if i == self.loopstart and i:
                 p.setPen(QPen(self._ui("warning", "#fbbf24"), 2))
                 p.drawLine(int(x0), top - 4, int(x0), top + h + 3)
             acc += d
-        x = left + self.current_tick * scale
-        p.setPen(QPen(text, 2))
-        p.drawLine(int(x), 2, int(x), self.height() - 2)
+        if self._move and self._move["active"]:
+            dest = self._move["dest"]
+            x = left + self.frame_start(dest) * scale
+            p.setPen(QPen(self._ui("warning", "#fbbf24"), 3))
+            p.drawLine(int(x), top - 6, int(x), top + h + 4)
+        if self._drag:
+            # balão com o que o arrasto está fazendo
+            dr = self._drag
+            if dr["all"]:
+                msg = tr("all frames ×{0} · {1} t").format(f"{dr['factor']:.2f}", sum(self.durations))
+            else:
+                i = dr["index"]
+                msg = tr("frame {0}: {1} → {2} t").format(i + 1, dr["orig"][i], self.times[i])
+            bf = QFont(p.font().family(), 8)
+            p.setFont(bf)
+            mw = QFontMetrics(bf).horizontalAdvance(msg) + 12
+            ex = left + self.frame_start(dr["index"] + 1) * scale
+            bx = int(min(max(left, ex - mw / 2), self.width() - mw - 4))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self._ui("window", "#1e1f24"))
+            p.drawRoundedRect(bx, 2, mw, 16, 4, 4)
+            p.setPen(text)
+            p.drawText(QRect(bx, 2, mw, 16), Qt.AlignmentFlag.AlignCenter, msg)
+        else:
+            x = left + self.current_tick * scale
+            p.setPen(QPen(text, 2))
+            p.drawLine(int(x), 2, int(x), self.height() - 2)
         p.end()
 
     def mousePressEvent(self, e):  # noqa: N802
+        x = e.position().x()
+        if e.button() == Qt.MouseButton.RightButton:
+            i, tick = self.frame_at(x)
+            if i >= 0:
+                self.menuRequested.emit(i, tick, e.globalPosition().toPoint())
+            return
+        i = self._edge_at(x) if e.button() == Qt.MouseButton.LeftButton else -1
+        if i >= 0:
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._drag = {"index": i, "x": x, "scale": self._scale(), "orig": list(self.times),
+                          "all": shift, "factor": 1.0,
+                          "frames": set(range(len(self.times))) if shift else {i}}
+            return
         total = max(1, sum(self.durations))
-        t = int((e.position().x() - self.LEFT) / ((self.width() - self.LEFT - 12) / total))
+        t = int((x - self.LEFT) / self._scale())
         if 0 <= t <= total:
             self.tickClicked.emit(t)
+        frame, _ = self.frame_at(x)
+        if frame >= 0 and e.button() == Qt.MouseButton.LeftButton:
+            self._move = {"index": frame, "x": x, "active": False, "dest": frame}
 
     def mouseMoveEvent(self, e):  # noqa: N802
+        x = e.position().x()
+        mv = self._move
+        if mv and e.buttons() & Qt.MouseButton.LeftButton:
+            if not mv["active"] and abs(x - mv["x"]) >= self.MOVE_START and len(self.durations) > 1:
+                mv["active"] = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if mv["active"]:
+                mv["dest"] = self._drop_index(x)
+                self.update()
+                return
+        dr = self._drag
+        if dr:
+            delta = round((x - dr["x"]) / dr["scale"])
+            orig, i = dr["orig"], dr["index"]
+            shown = [max(1, t) if t >= 0 else 60 for t in orig]
+            if dr["all"]:
+                end = sum(shown[:i + 1])
+                dr["factor"] = max(1, end + delta) / end
+                times = self.stretch(orig, dr["factor"])
+            else:
+                times = list(orig)
+                times[i] = max(1, shown[i] + delta)
+            self.times = times
+            self.durations = [max(1, t) if t >= 0 else 60 for t in times]
+            self.update()
+            return
         if e.buttons() & Qt.MouseButton.LeftButton:
-            self.mousePressEvent(e)
+            t = int((x - self.LEFT) / self._scale())
+            if 0 <= t <= sum(self.durations):
+                self.tickClicked.emit(t)
+            return
+        self.setCursor(Qt.CursorShape.SizeHorCursor if self._edge_at(x) >= 0 else Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        dr, self._drag = self._drag, None
+        mv, self._move = self._move, None
+        if dr and self.times != dr["orig"]:
+            self.retimed.emit(list(self.times))
+        if mv and mv["active"]:
+            src, dest = mv["index"], mv["dest"]
+            new = dest - 1 if dest > src else dest          # posição depois de tirar o frame
+            if new != src:
+                self.frameMoved.emit(src, new)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update()
+
+    def keyPressEvent(self, e):  # noqa: N802
+        if self._move and e.key() == Qt.Key.Key_Escape:
+            self._move = None
+            self.update()
+            return
+        if self._drag and e.key() == Qt.Key.Key_Escape:
+            orig = self._drag["orig"]
+            self._drag = None
+            self.times = orig
+            self.durations = [max(1, t) if t >= 0 else 60 for t in orig]
+            self.update()
+            return
+        super().keyPressEvent(e)

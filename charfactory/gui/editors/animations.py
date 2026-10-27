@@ -108,7 +108,7 @@ class AnimationEditor(QWidget):
             None,
             ("wizard", tr("Create a move in the Wizard from this animation · Ctrl+Shift+M"), self.open_move_wizard),
         ], 18)
-        self.onion = QCheckBox(tr("Show onion skin"))
+        self.onion = QCheckBox(tr("Show"))
         self.onion.setChecked(bool(ctx.settings.get("onion", True)))
         self.onion.toggled.connect(lambda _: self.show_frame())
         self.onion_mode = QComboBox()
@@ -121,7 +121,8 @@ class AnimationEditor(QWidget):
             w.setEnabled(False)
             w.valueChanged.connect(lambda _: self.show_frame())
         self.onion_mode.currentIndexChanged.connect(
-            lambda i: ([w.setEnabled(i == 1) for w in (self.onion_anim, self.onion_frame)], self.show_frame()))
+            lambda i: ([w.setEnabled(i == 1) for w in (self.onion_anim, self.onion_frame)],
+                       self.onion_other.setVisible(i == 1), self.show_frame()))
         self.speed = QComboBox()
         for label, v in ((tr("0.25×"), 0.25), (tr("0.5×"), 0.5), (tr("1× (60 ticks/s)"), 1.0), ("2×", 2.0), ("4×", 4.0)):
             self.speed.addItem(label, v)
@@ -139,16 +140,16 @@ class AnimationEditor(QWidget):
         act_sec.add(form_row(tr("Number"), self.number), form_row(tr("Name"), self.name), form_row(tr("Speed"), self.speed))
 
         frame_sec = Section(tr("Frame"), "anims.frame")
+        self.frame_sec = frame_sec
         for b in (tool_button("add_frame", tr("Add frame (Ctrl+Shift+A)"), self.add_frame, size=16),
                   tool_button("duplicate", tr("Duplicate frame"), self.dup_frame, size=16),
                   tool_button("delete", tr("Delete frame (Ctrl+Shift+Del)"), self.del_frame, size=16)):
             frame_sec.add_header_widget(b)
         self.offset.trailing.addWidget(apply_btn(tr("Apply offset to the next frames (Alt+Shift+O)"), "offset"),
                                        0, Qt.AlignmentFlag.AlignVCenter)
-        frame_sec.add(self.frame_nav, self.gi, self.offset,
+        frame_sec.add(self.gi, self.offset,
                       form_row(tr("Time"), self.time, apply_btn(tr("Apply time to the next frames (Alt+Shift+T)"), "time")),
-                      form_row(tr("Flip"), self.flip, apply_btn(tr("Apply flip to the next frames (Alt+Shift+F)"), "flip")),
-                      self.loop)
+                      form_row(tr("Flip"), self.flip, apply_btn(tr("Apply flip to the next frames (Alt+Shift+F)"), "flip")))
 
         blend_sec = Section(tr("Transparency and scale"), "anims.blend", collapsed=True)
         ip = QGridLayout()
@@ -156,21 +157,35 @@ class AnimationEditor(QWidget):
         ip.setVerticalSpacing(4)
         for n, cb in enumerate(self.interp.values()):
             ip.addWidget(cb, n // 2, n % 2)
+        self.alpha_rows = QWidget()
+        ar = QVBoxLayout(self.alpha_rows)
+        ar.setContentsMargins(0, 0, 0, 0)
+        ar.addLayout(form_row(tr("Source"), self.src, 26))
+        ar.addLayout(form_row(tr("Destination"), self.dst, 26))
+        self.alpha_rows.hide()
         blend_sec.add(form_row(tr("Mode"), self.trans,
                                apply_btn(tr("Apply transparency to the next frames (Alt+B)"), "trans")),
-                      form_row(tr("Source"), self.src, 26), form_row(tr("Destination"), self.dst, 26),
-                      hint_label(tr("Source and destination work in AS…D… mode (changing them turns the mode on).")),
+                      self.alpha_rows,
                       form_row(tr("Scale X"), self.xs, apply_btn(tr("Apply scale and angle to the next frames"), "scale")),
                       form_row(tr("Scale Y"), self.ys, 26), form_row(tr("Angle"), self.ang, 26),
                       field_label(tr("Interpolate to the next frame (MUGEN 1.1)")), ip)
 
         box_sec = Section(tr("Collision boxes"), "anims.boxes")
         box_sec.add(self.box_tools,
-                    hint_label(tr("Turn on the red box (attack) or the blue one (collision) and drag on the canvas to draw; Shift+drag draws without turning it on. Dragging a box moves it, the edges resize it and Del deletes it.")))
+                    hint_label(tr("Turn on red (attack) or blue (collision) and drag on the canvas. Drag a box to move "
+                                  "it, its edges to resize; Del deletes.")))
 
         onion_sec = Section(tr("Onion skin"), "anims.onion", collapsed=True)
-        onion_sec.add(self.onion, form_row(tr("Show"), self.onion_mode),
-                      form_row(tr("Anim"), self.onion_anim), form_row(tr("Frame"), self.onion_frame))
+        self.onion_other = QWidget()
+        oo = QVBoxLayout(self.onion_other)
+        oo.setContentsMargins(0, 0, 0, 0)
+        oo.addLayout(form_row(tr("Anim"), self.onion_anim))
+        oo.addLayout(form_row(tr("Frame"), self.onion_frame))
+        self.onion_other.hide()
+        onion_row = QHBoxLayout()
+        onion_row.addWidget(self.onion)
+        onion_row.addWidget(self.onion_mode, 1)
+        onion_sec.add(onion_row, self.onion_other)
 
         content = QWidget()
         lv = QVBoxLayout(content)
@@ -197,6 +212,9 @@ class AnimationEditor(QWidget):
         self._clip_frames: list = []
         self.timeline = Timeline()
         self.timeline.tickClicked.connect(self.goto_tick)
+        self.timeline.retimed.connect(self.retime)
+        self.timeline.frameMoved.connect(self.move_frame)
+        self.timeline.menuRequested.connect(self.frame_menu)
         center = QWidget()
         cv = QVBoxLayout(center)
         cv.setContentsMargins(0, 0, 0, 0)
@@ -336,6 +354,8 @@ class AnimationEditor(QWidget):
             self.src.setValue(int(m[1]))
             self.dst.setValue(int(m[2]))
         self.loop.setChecked(self.frame_nav.index() == a.loopstart)
+        self.frame_sec.head.setText(tr("Frame {0} / {1}").format(self.frame_nav.index() + 1, len(a.frames)))
+        self.alpha_rows.setVisible(self.trans.currentIndex() == 4)
         ex = (f.extra + ["", "", ""])[:3]
         self.xs.setValue(float(ex[0] or 1))
         self.ys.setValue(float(ex[1] or 1))
@@ -782,13 +802,90 @@ class AnimationEditor(QWidget):
         self.play_action.setChecked(False)
         self.frame_nav.set_index(0)
 
+    def move_frame(self, src: int, dst: int) -> None:
+        """Muda a ordem de um frame (arrastado na timeline); o início do loop segue o seu frame."""
+        a = self.action()
+        if not a or not (0 <= src < len(a.frames)) or not (0 <= dst < len(a.frames)) or src == dst:
+            return
+        loop = a.frames[a.loopstart] if 0 <= a.loopstart < len(a.frames) else None
+        a.frames.insert(dst, a.frames.pop(src))
+        if loop is not None:
+            a.loopstart = next(k for k, f in enumerate(a.frames) if f is loop)
+        self._changed()
+        self.show_action(dst)
+        self.ctx.status.emit(tr("Frame {0} moved to position {1}").format(src + 1, dst + 1))
+
+    def split_frame(self, i: int, tick: int) -> None:
+        """Divide o frame em dois no tick clicado (10t clicado no 4 vira 4t + 6t)."""
+        a = self.action()
+        if not a or not (0 <= i < len(a.frames)):
+            return
+        f = a.frames[i]
+        if f.time <= 1 or not 0 < tick < f.time:
+            self.ctx.status.emit(tr("Click inside a frame with more than 1 tick to split it there"))
+            return
+        second = copy.deepcopy(f)
+        second.time = f.time - tick
+        f.time = tick
+        a.frames.insert(i + 1, second)
+        self._changed()
+        self.show_action(i + 1)
+        self.ctx.status.emit(tr("Frame {0} split into {1}t + {2}t").format(i + 1, f.time, second.time))
+
+    def set_loopstart(self, i: int) -> None:
+        a = self.action()
+        if a and 0 <= i < len(a.frames):
+            a.loopstart = i
+            self._changed()
+            self.show_action(i)
+
+    def frame_menu(self, i: int, tick: int, pos) -> None:
+        """Clique direito num frame da timeline."""
+        from PySide6.QtWidgets import QMenu
+        a = self.action()
+        if not a or not (0 <= i < len(a.frames)):
+            return
+        self.frame_nav.set_index(i)
+        n = len(a.frames)
+        m = QMenu(self)
+        m.addAction(tr("Duplicate frame"), self.dup_frame)
+        m.addAction(tr("New frame after this one"), self.add_frame)
+        split = m.addAction(tr("Split here ({0}t + {1}t)").format(tick, a.frames[i].time - tick)
+                            if 0 < tick < a.frames[i].time else tr("Split here"),
+                            lambda: self.split_frame(i, tick))
+        split.setEnabled(a.frames[i].time > 1 and 0 < tick < a.frames[i].time)
+        m.addSeparator()
+        left = m.addAction(tr("Move left"), lambda: self.move_frame(i, i - 1))
+        left.setEnabled(i > 0)
+        right = m.addAction(tr("Move right"), lambda: self.move_frame(i, i + 1))
+        right.setEnabled(i < n - 1)
+        loop = m.addAction(tr("Loop starts here"), lambda: self.set_loopstart(i))
+        loop.setCheckable(True)
+        loop.setChecked(a.loopstart == i)
+        m.addSeparator()
+        rm = m.addAction(tr("Delete frame"), self.del_frame)
+        rm.setEnabled(n > 1)
+        m.exec(pos)
+
+    def retime(self, times: list) -> None:
+        """Tempos novos vindos do arrasto na timeline (um passo de desfazer)."""
+        a = self.action()
+        if not a or len(times) != len(a.frames):
+            return
+        for f, t in zip(a.frames, times):
+            f.time = t
+        self._changed()
+        self.show_frame()
+        self.ctx.status.emit(tr("Animation {0}: {1} ticks").format(a.number, a.total_time) if a.total_time >= 0
+                             else tr("Animation {0}: infinite").format(a.number))
+
     def goto_tick(self, t: int) -> None:
         a = self.action()
         if not a:
             return
         acc = 0
         for i, f in enumerate(a.frames):
-            d = f.time if f.time > 0 else 60
+            d = max(1, f.time) if f.time >= 0 else 60
             if t < acc + d:
                 self.frame_nav.set_index(i)
                 return

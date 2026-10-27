@@ -249,6 +249,9 @@ class CodeEdit(QPlainTextEdit):
         self.setViewportMargins(self.gutter_width(), 0, 0, 0)
         self.highlighter = MugenHighlighter(self.document(), theme)
         self.issue_lines: dict[int, str] = {}  # linha -> severidade
+        self.search_hits: list[tuple[int, int]] = []   # (posição, tamanho) da barra de busca
+        self.search_current = -1
+        self._search_sels: list = []
         self.theme = theme
         g = validate.grammar()
         words = sorted({c["name"] for c in g["controllers"].values()} | {t["name"] for t in g["triggers"].values()} |
@@ -411,6 +414,7 @@ class CodeEdit(QPlainTextEdit):
         cur.cursor = self.textCursor()
         cur.cursor.clearSelection()
         sels.append(cur)
+        sels += self._search_sels
         sels += self._bracket_selections()
         for line, sev in self.issue_lines.items():
             block = self.document().findBlockByNumber(line - 1)
@@ -465,6 +469,40 @@ class CodeEdit(QPlainTextEdit):
                     out.append(sel)
                 return out
         return []
+
+    def _search_selections(self) -> list:
+        """Todas as ocorrências da barra de busca; a atual mais forte."""
+        if not self.search_hits:
+            return []
+        base = QColor(self.theme.ui.get("warning", "#d29922"))
+        weak, strong = QColor(base), QColor(base)
+        weak.setAlpha(70)
+        strong.setAlpha(170)
+        out = []
+        doc = self.document()
+        for k, (pos, n) in enumerate(self.search_hits):
+            sel = QTextEdit.ExtraSelection()
+            sel.format.setBackground(strong if k == self.search_current else weak)
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.setPosition(pos + n, QTextCursor.MoveMode.KeepAnchor)
+            sel.cursor = c
+            out.append(sel)
+        return out
+
+    def set_search_hits(self, hits: list[tuple[int, int]], current: int) -> None:
+        if not hits and not self.search_hits:
+            return
+        self.search_hits, self.search_current = hits, current
+        self._search_sels = self._search_selections()    # montadas uma vez, não a cada tecla
+        self.refresh_selections()
+
+    def reveal(self, pos: int) -> None:
+        """Desdobra a seção quando a posição está num bloco dobrado."""
+        block = self.document().findBlock(pos)
+        if block.isValid() and not block.isVisible():
+            self._set_folded(self._header_of(block), False)
+            self._refold()
 
     def set_issues(self, issues: dict[int, str]) -> None:
         self.issue_lines = issues

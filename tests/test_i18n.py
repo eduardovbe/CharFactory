@@ -29,6 +29,21 @@ def test_catalogs_cover_every_text_with_the_same_placeholders():
         assert not r["missing"][lang_], r["missing"][lang_][:10]
         assert not r["holes"][lang_], r["holes"][lang_][:10]
         assert not r["stale"][lang_], r["stale"][lang_][:10]
+        assert not r["doc missing"][lang_], r["doc missing"][lang_][:3]
+
+
+def test_controller_docs_follow_the_language(lang):
+    """Descrição dos controllers e parâmetros (doc do MUGEN e wiki do IKEMEN) na língua escolhida."""
+    from charfactory import sctrldocs, validate
+    helper = validate.grammar()["controllers"]["helper"]["description"]
+    layer = sctrldocs.ikemen_docs()["explod"]["layerno"]["doc"]
+    assert sctrldocs.doc(helper) == helper
+    lang("pt_BR")
+    assert sctrldocs.doc(helper) == "Cria outra instância do jogador como um personagem helper."
+    assert sctrldocs.doc(layer).startswith("Em qual camada o explod")
+    lang("es")
+    assert sctrldocs.doc(helper) == "Crea otra instancia del jugador como un personaje helper."
+    assert sctrldocs.doc("text that has no translation") == "text that has no translation"
 
 
 def test_switching_language_translates(lang):

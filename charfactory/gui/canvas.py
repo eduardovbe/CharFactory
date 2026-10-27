@@ -60,6 +60,13 @@ class SpriteCanvas(QWidget):
         self._img_drag = None
         self._frozen_origin: QPointF | None = None   # origem parada durante o Ctrl+arrastar
         self.drag_image = False     # Ctrl+arrastar move o sprite (offset do frame / eixo do sprite)
+        # editor de sprites: arrastar o sprite (sem Ctrl) move a figura, como no FFS; arrastar o
+        # vazio move a vista
+        self.drag_image_plain = False
+        self._img_drag_lock = None      # Shift ao arrastar: trava num eixo ('x' ou 'y')
+        # fundo de stage atrás do sprite: {"kind": "simple", "size": (w, h)} ou
+        # {"kind": "image", "image": QImage, "pos": (x, y), "scale": k} (coords do personagem)
+        self.backdrop: dict | None = None
         self.box_moved = False
         self.show_axis = True
         self.center_image = False  # True: centraliza o sprite (editor de sprites); False: eixo no chão
@@ -78,6 +85,10 @@ class SpriteCanvas(QWidget):
                   offset: tuple[int, int] = (0, 0)) -> None:
         self.image = pil_to_qimage(img) if img is not None else None
         self.image_pos = QPoint(offset[0] - axis_x, offset[1] - axis_y)
+        self.update()
+
+    def set_backdrop(self, backdrop: dict | None) -> None:
+        self.backdrop = backdrop
         self.update()
 
     def set_blend(self, trans: str) -> None:
@@ -112,14 +123,27 @@ class SpriteCanvas(QWidget):
         return QPointF(self.width() / 2, self.height() * 0.78) + self.pan
 
     def fit(self, max_zoom: int = 4) -> None:
-        """Maior zoom (até max_zoom) em que a imagem cabe inteira."""
+        """Maior zoom (até max_zoom) em que a imagem cabe inteira. Com o eixo no chão, cabem a
+        imagem e o eixo; se a figura sairia da tela, a vista centraliza os dois."""
         if self.image is None:
             return
+        x0, y0 = self.image_pos.x(), self.image_pos.y()
+        x1, y1 = x0 + self.image.width(), y0 + self.image.height()
+        if not self.center_image:
+            x0, y0, x1, y1 = min(x0, 0), min(y0, 0), max(x1, 0), max(y1, 0)
         z = max_zoom
-        while z > 1 and (self.image.width() * z > self.width() * 0.9 or self.image.height() * z > self.height() * 0.9):
+        while z > 1 and ((x1 - x0) * z > self.width() * 0.9 or (y1 - y0) * z > self.height() * 0.9):
             z -= 1
         self.pan = QPointF(0, 0)
         self.set_zoom(z)
+        if not self.center_image:
+            o = self.origin()
+            inside = (o.x() + x0 * z >= self.RULER + 8 and o.x() + x1 * z <= self.width() and
+                      o.y() + y0 * z >= self.RULER and o.y() + y1 * z <= self.height())
+            if not inside:
+                cx, cy = o.x() + (x0 + x1) / 2 * z, o.y() + (y0 + y1) / 2 * z
+                self.pan = QPointF(self.width() / 2 - cx, self.height() / 2 - cy)
+                self.update()
 
     def to_screen(self, x: float, y: float) -> QPointF:
         o = self.origin()
@@ -213,13 +237,16 @@ class SpriteCanvas(QWidget):
         grad.setColorAt(1, QColor(t.c("back_end").hex if t else "#333"))
         p.fillRect(self.rect(), grad)
         o = self.origin()
+        if self.backdrop:
+            self._draw_backdrop(p)
         if self.show_grid:
             self._draw_grid(p, o)
-        # linha do chão
+        # linha do chão (com fundo de stage quem desenha é o fundo, uma linha só)
         ground = QColor(self.theme.ui["text_dim"] if self.theme else "#888")
         ground.setAlpha(90)
         p.setPen(QPen(ground, 1, Qt.PenStyle.DashLine))
-        p.drawLine(0, int(o.y()), self.width(), int(o.y()))
+        if not self.backdrop:
+            p.drawLine(0, int(o.y()), self.width(), int(o.y()))
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         if self.onion is not None:
             p.setOpacity(getattr(self, "onion_opacity", 0.35))
@@ -229,6 +256,73 @@ class SpriteCanvas(QWidget):
             p.setOpacity(1.0)
         if self.image is not None and not blended:
             p.drawImage(self._sprite_rect(), self.image)
+
+    def _draw_backdrop(self, p: QPainter) -> None:
+        b = self.backdrop
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        if b.get("kind") == "image" and b.get("image") is not None:
+            img, k = b["image"], b.get("scale", 1.0)
+            tl = self.to_screen(*b["pos"])
+            p.drawImage(QRectF(tl.x(), tl.y(), img.width() * k * self.zoom, img.height() * k * self.zoom), img)
+            self._draw_ground(p)
+        elif b.get("kind") == "simple":
+            self._draw_simple_stage(p, b.get("size", (320, 240))[1])
+        p.restore()
+
+    def _draw_ground(self, p: QPainter) -> None:
+        """Linha do chão (y = 0), fina e quase transparente, por cima do fundo."""
+        floor = self.to_screen(0, 0).y()
+        p.setPen(QPen(QColor(255, 255, 255, 55), 1))
+        p.drawLine(QPointF(0, floor), QPointF(self.width(), floor))
+
+    def _draw_simple_stage(self, p: QPainter, h: int) -> None:
+        """Stage de treino: parede ao fundo e chão em perspectiva com o mesmo quadriculado,
+        a parede encontrando o chão um pouco acima do pé (y = 0)."""
+        tile = 40                                    # lado do quadrado, em pixels do personagem
+        horizon = self.to_screen(0, -round(h * 0.3)).y()
+        floor = self.to_screen(0, 0).y()
+        W, H = self.width(), self.height()
+        vx = self.to_screen(0, 0).x()
+        step = tile * self.zoom
+        wall = QLinearGradient(0, horizon - 8 * step, 0, horizon)
+        wall.setColorAt(0, QColor("#2c313c"))
+        wall.setColorAt(1, QColor("#3d4352"))
+        p.fillRect(QRectF(0, 0, W, max(0.0, horizon)), wall)
+        ground = QLinearGradient(0, horizon, 0, H)
+        ground.setColorAt(0, QColor("#4a505f"))
+        ground.setColorAt(1, QColor("#2a2e37"))
+        p.fillRect(QRectF(0, horizon, W, max(0.0, H - horizon)), ground)
+        line = QColor("#ffffff")
+        line.setAlpha(30)
+        p.setPen(QPen(line, 1))
+        # parede: quadriculado reto, alinhado com o eixo x = 0
+        n0, n1 = math.floor(-vx / step) - 1, math.ceil((W - vx) / step) + 1
+        for n in range(n0, n1 + 1):
+            p.drawLine(QPointF(vx + n * step, 0), QPointF(vx + n * step, horizon))
+        y = horizon - step
+        while y > 0:
+            p.drawLine(QPointF(0, y), QPointF(W, y))
+            y -= step
+        # chão: as colunas da parede seguem para a frente abrindo (ponto de fuga acima da parede)
+        spread = 1.6                                 # largura do quadrado no pé / na parede
+        top = (spread * horizon - floor) / (spread - 1)
+        span = max(1.0, horizon - top)
+        far = (H - top) / span
+        for n in range(n0, n1 + 1):
+            p.drawLine(QPointF(vx + n * step, horizon), QPointF(vx + n * step * far, H))
+        # fileiras de profundidade igual: 1/escala cai em passos iguais a partir da parede
+        c = 0.45 * step / span
+        k = 1
+        while 1 - k * c > 0.05:
+            y = top + span / (1 - k * c)
+            if y > H:
+                break
+            p.drawLine(QPointF(0, y), QPointF(W, y))
+            k += 1
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.drawLine(QPointF(0, horizon), QPointF(W, horizon))
+        self._draw_ground(p)
 
     def _paint_overlay(self, p: QPainter) -> None:
         """Caixas, eixo, réguas e zoom, sempre por cima e sem mistura."""
@@ -395,12 +489,19 @@ class SpriteCanvas(QWidget):
             # novo eixo relativo ao canto do sprite
             self.axisPicked.emit(x - self.image_pos.x(), y - self.image_pos.y())
             return
-        if self.drag_image and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        on_sprite = self.image is not None and self._sprite_rect().contains(pos)
+        if self.drag_image and (e.modifiers() & Qt.KeyboardModifier.ControlModifier or
+                                (self.drag_image_plain and on_sprite)):
             # o deslocamento é medido na tela e a origem fica parada: com a figura centralizada, mudar
             # o eixo movia a origem a cada passo e o eixo fugia do mouse
             self._img_drag = pos
+            self._img_drag_lock = None
             self._frozen_origin = self.origin()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+        if self.drag_image_plain and not self.edit_boxes:
+            self._pan_start = (pos, QPointF(self.pan))     # arrastar o vazio move a vista
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
             return
         if not self.edit_boxes:
             return
@@ -429,8 +530,11 @@ class SpriteCanvas(QWidget):
             self.update()
             return
         if self._img_drag:
-            self.imageDragged.emit(*self._img_delta(pos), False)
+            self.imageDragged.emit(*self._img_delta(pos, e.modifiers()), False)
             return
+        if self.drag_image_plain and not self.edit_boxes and not e.buttons():
+            over = self.image is not None and self._sprite_rect().contains(pos) and not self.pick_axis
+            self.setCursor(Qt.CursorShape.OpenHandCursor if over else Qt.CursorShape.ArrowCursor)
         if self.edit_boxes and not self._drag:
             _, h = self._hit(pos)
             cursors = {"move": Qt.CursorShape.SizeAllCursor, "l": Qt.CursorShape.SizeHorCursor,
@@ -468,9 +572,11 @@ class SpriteCanvas(QWidget):
     def mouseReleaseEvent(self, e):
         if self._pan_start:
             self._pan_start = None
+            if self.drag_image_plain:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
             return
         if self._img_drag:
-            self.imageDragged.emit(*self._img_delta(e.position()), True)
+            self.imageDragged.emit(*self._img_delta(e.position(), e.modifiers()), True)
             self._img_drag = None
             frozen, self._frozen_origin = self._frozen_origin, None
             self.pan += frozen - self.origin()     # a vista fica onde estava ao soltar
@@ -490,9 +596,20 @@ class SpriteCanvas(QWidget):
                 self.boxesChanged.emit()
             self.update()
 
-    def _img_delta(self, pos: QPointF) -> tuple[int, int]:
+    def _img_delta(self, pos: QPointF, mods=Qt.KeyboardModifier.NoModifier) -> tuple[int, int]:
         d = (pos - self._img_drag) / self.zoom
-        return round(d.x()), round(d.y())
+        dx, dy = round(d.x()), round(d.y())
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            # Shift: só na horizontal ou só na vertical (a direção que andou mais primeiro)
+            if self._img_drag_lock is None and (abs(dx) > 2 or abs(dy) > 2):
+                self._img_drag_lock = "x" if abs(dx) >= abs(dy) else "y"
+            if self._img_drag_lock == "x":
+                dy = 0
+            elif self._img_drag_lock == "y":
+                dx = 0
+        else:
+            self._img_drag_lock = None
+        return dx, dy
 
     def update_cursor(self) -> None:
         self.setCursor(Qt.CursorShape.CrossCursor if self.draw_box_kind is not None else Qt.CursorShape.ArrowCursor)

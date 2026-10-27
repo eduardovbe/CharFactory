@@ -437,6 +437,7 @@ class Dummy:
     custom: int = 0          # estado do atacante em que o boneco está (HitDef p2stateno, TargetState)
     pose: str = "stand"      # postura parada: "stand", "crouch" ou "air" (paira no alto até apanhar)
     guard: bool = False      # defende o que o guardflag deixa
+    life: int = 1000         # vida do boneco (lifemax padrão do MUGEN), para o dano do golpe
 
     def state_no(self) -> int:
         if self.custom:
@@ -1160,6 +1161,8 @@ class Sim:
         g = lambda k, dft=(0, 0): self.evpair(ent, p[k], dft) if k in p else dft
         if self._guards(d, p):
             return self._guarded(ent, hd, contact, g)
+        dmg = self._damage(ent, p, g)
+        d.life = max(0, d.life - dmg["dealt"])
         ent.hitdef_hit = True
         ent.movehit = ent.movecontact = 1
         ent.hit_now = True
@@ -1190,12 +1193,32 @@ class Sim:
                             "state": ent.stateno, "root_state": (ent.root or ent).stateno,
                             # peso do acerto (nota de qualidade: o final tem de pesar mais)
                             "damage": int(g("damage", (0, 0))[0]), "pause": [int(pt[0]), int(pt[1])],
+                            "dealt": dmg["dealt"], "guard_damage": dmg["guard"], "p1power": dmg["p1power"],
+                            "p2power": dmg["p2power"], "life": d.life, "attr": p.get("attr", "").strip(),
+                            "animtype": p.get("animtype", "Light").strip(),
                             "fall": d.fall, "shake": int(self.ev(ent, p.get("envshake.time", "0"), 0)) > 0,
                             "sound": bool(p.get("hitsound", "").strip()),
                             "snd": self._sound(ent, p.get("hitsound", ""), hitdef=True),
                             "hittime": d.hittime,
                             # o oponente vai para um estado do atacante (agarrão cinematográfico)
                             "p2state": bool(p.get("p2stateno", "").strip())})
+
+    # Default.Attack.LifeToPowerMul e Default.GetHit.LifeToPowerMul do mugen.cfg padrão
+    POWER_HIT, POWER_GETHIT = 0.7, 0.6
+
+    def _damage(self, ent, p: dict, g) -> dict:
+        """Dano e energia de um contato do HitDef, como o MUGEN conta: o dano vezes o attack do
+        [Data] do char (o boneco tem defence 100); sem getpower/givepower, a energia vem do dano."""
+        pair = lambda v: (int(v[0]) if len(v) > 0 else 0, int(v[1]) if len(v) > 1 else 0)
+        hit, guard = pair(g("damage", (0, 0)))
+        attack = (self.const("data.attack") or 100) / 100
+        # sem o 2º valor (p1gpower, p2gpower) a energia na defesa é a metade, como no MUGEN
+        given = lambda k: pair(g(k)) if len(_split_args(p[k])) > 1 else (pair(g(k))[0], None)
+        p1 = given("getpower") if "getpower" in p else (round(hit * self.POWER_HIT), None)
+        p2 = given("givepower") if "givepower" in p else (round(hit * self.POWER_GETHIT), None)
+        return {"dealt": round(hit * attack), "guard": round(guard * attack),
+                "p1power": p1[0], "p1gpower": p1[1] if p1[1] is not None else p1[0] // 2,
+                "p2power": p2[0], "p2gpower": p2[1] if p2[1] is not None else p2[0] // 2}
 
     def _guards(self, d: Dummy, p: dict) -> bool:
         """O boneco que defende segura o golpe se está livre e o guardflag cobre a postura
@@ -1209,6 +1232,8 @@ class Sim:
     def _guarded(self, ent: Entity, hd: dict, contact, g) -> None:
         # MUGEN: guard.pausetime, guard.velocity e guard.hittime caem nos valores do acerto
         d, p = self.p2, hd["params"]
+        dmg = self._damage(ent, p, g)
+        d.life = max(0, d.life - dmg["guard"])
         ent.hitdef_hit = True
         ent.movecontact = ent.moveguarded = 1
         ent.hit_now = True
@@ -1227,6 +1252,8 @@ class Sim:
                             "ci": hd.get("index"),
                             "contact": contact, "state": ent.stateno, "root_state": (ent.root or ent).stateno,
                             "pause": [int(pt[0]), int(pt[1])], "hittime": d.hittime,
+                            "dealt": dmg["guard"], "p1power": dmg["p1gpower"], "p2power": dmg["p2gpower"],
+                            "life": d.life, "attr": p.get("attr", "").strip(),
                             "snd": self._sound(ent, p.get("guardsound", "6,0"), hitdef=True)})
 
     def step_dummy(self):
@@ -2140,3 +2167,21 @@ def move_states(char) -> list[int]:
     t = char.commands.doc.to_text()     # o texto em memória: um golpe novo ainda não salvo já conta
     return sorted({int(v) for v in re.findall(r"(?im)^\s*value\s*=\s*(\d+)\s*$", t)
                    if 200 <= int(v) < 4000 and int(v) != 500})
+
+
+def damage_report(sim) -> dict:
+    """Dano do golpe simulado: cada acerto e defesa (dano, energia, pausa, tempo de golpe,
+    atributo) e os totais, com a vida que sobra ao boneco (de 1000)."""
+    rows = [e for e in sim.events if e["kind"] in ("acerto", "defesa")]
+    hits = [e for e in rows if e["kind"] == "acerto"]
+    total = sum(e.get("dealt", 0) for e in rows)
+    return {"rows": rows, "hits": len(hits), "guards": len(rows) - len(hits), "total": total,
+            "life": 1000 - total, "percent": round(total / 10, 1),
+            "p1power": sum(e.get("p1power", 0) for e in rows),
+            "p2power": sum(e.get("p2power", 0) for e in rows)}
+
+
+def life_at(sim, t: int) -> int:
+    """Vida do boneco no tick t (antes de qualquer acerto, 1000)."""
+    return 1000 - sum(e.get("dealt", 0) for e in sim.events
+                      if e["kind"] in ("acerto", "defesa") and e["t"] <= t)

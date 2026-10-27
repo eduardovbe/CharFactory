@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QHeaderView, QLab
                                QSizePolicy, QSplitter, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                                QWidget)
 
-from ... import validate as vmod
+from ... import sctrldocs, validate as vmod
 from ...project import ProjectError
 from ...formats import air, cmd, cns, mtext
 from ...tools import generate, ops
@@ -221,6 +221,8 @@ class CodePage(QWidget):
         cb.addWidget(self.apply_btn)
         self.crumb_bar = crumb_bar
         crumb_bar.hide()
+        from ..findbar import FindBar
+        self.find_bar = FindBar(self)       # Ctrl+F: fica abaixo da barra de contexto da aba ativa
         # a barra fica entre a aba e o editor: muda para dentro da aba ativa (_place_crumb)
         self.tabs.currentChanged.connect(lambda _: (self._place_crumb(), self.sync_to_cursor()))
 
@@ -235,6 +237,8 @@ class CodePage(QWidget):
         lay.addWidget(split)
 
         QShortcut(QKeySequence("Ctrl+Return"), self, self.apply_current)
+        if kind in ("states", "cmd"):
+            QShortcut(QKeySequence("Ctrl+Shift+Space"), self, self.edit_controller)
         ctx.characterChanged.connect(self.on_character)
         ctx.themeChanged.connect(self.on_theme)
         ctx.modelChanged.connect(self.on_model)
@@ -251,9 +255,15 @@ class CodePage(QWidget):
         f = self.current()
         if f:
             f["box"].layout().insertWidget(0, self.crumb_bar)
+            f["box"].layout().insertWidget(1, self.find_bar)
             self.crumb_bar.show()
         else:
             self.crumb_bar.hide()
+        self.find_bar.set_editor(f["edit"] if f else None)
+
+    def open_find(self, text: str = "", replace: bool = False) -> None:
+        if self.current():
+            self.find_bar.open(text, replace)
 
     # ------------------------------------------------------------ painéis
 
@@ -298,7 +308,7 @@ class CodePage(QWidget):
         self.ctrls.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.ctrls.setIndentation(12)
         self.ctrls.setUniformRowHeights(True)
-        self.ctrls.setToolTip(tr("Click shows what the controller does; double-click inserts it into the state"))
+        self.ctrls.setToolTip(tr("Click shows what the controller does; double-click opens its parameters to insert it"))
         g = vmod.grammar()
         by_cat: dict[str, list] = {}
         known = {n.lower() for _, _, names in CTRL_CATEGORIES for n in names.split()}
@@ -321,7 +331,7 @@ class CodePage(QWidget):
             for c in items:
                 it = QTreeWidgetItem([c["name"] + (tr(" (deprecated)") if c.get("deprecated") else "")])
                 it.setData(0, ROLE_KEY, c["name"])
-                it.setToolTip(0, c.get("description") or c["name"])
+                it.setToolTip(0, sctrldocs.doc(c.get("description", "")) or c["name"])
                 if c.get("deprecated"):
                     f = it.font(0)
                     f.setItalic(True)
@@ -345,14 +355,16 @@ class CodePage(QWidget):
         self.card_text = hint_label("")
         self.card_req = hint_label("")
         self.card_req.setTextFormat(Qt.TextFormat.RichText)
-        self.card_insert = QPushButton(tr("Insert into state"))
+        self.card_insert = QPushButton(tr("Insert into state…"))
         self.card_insert.setProperty("primary", True)
         self.card_insert.setObjectName("compactPrimary")
-        self.card_insert.setToolTip(tr("Inserts below the current line, with the required parameters"))
+        self.card_insert.setToolTip(tr("Opens every parameter with what each one does; inserts below the current line"))
         self.card_insert.clicked.connect(lambda: self._selected_ctrl() and self.insert_controller(self._selected_ctrl()))
         row = QHBoxLayout()
         row.setSpacing(4)
         row.addWidget(self.card_insert, 1)
+        row.addWidget(tool_button("edit", tr("Edit the parameters of the controller at the cursor (Ctrl+Shift+Space)"),
+                                  self.edit_controller))
         row.addWidget(tool_button("info", tr("Full reference (all parameters)"), self.show_reference))
         cl.addWidget(self.card_title)
         cl.addWidget(self.card_text)
@@ -391,7 +403,7 @@ class CodePage(QWidget):
             return
         spec = generate.describe_controller(name)
         self.card_title.setText(spec["name"])
-        desc = spec["description"] or ""
+        desc = sctrldocs.doc(spec["description"] or "")
         self.card_text.setText(desc if len(desc) <= 220 else desc[:217].rsplit(" ", 1)[0] + "…")
         req = spec["required"]
         self.card_req.setText(tr("<b>Required:</b> ") + (", ".join(req) if req else tr("none besides the trigger")))
@@ -435,6 +447,8 @@ class CodePage(QWidget):
 
     def unload(self) -> None:
         self.crumb_bar.setParent(None)        # sai da aba antiga antes de ela ser descartada
+        self.find_bar.setParent(None)
+        self.find_bar.set_editor(None)
         self._expanded = {}                   # personagem novo: a árvore começa toda fechada
         old = [self.tabs.widget(i) for i in range(self.tabs.count())]
         self.tabs.clear()
@@ -881,14 +895,52 @@ class CodePage(QWidget):
             self.fill_snippets()
 
     def insert_controller(self, name: str) -> None:
-        self._insert(generate.controller_template(name, self._current_statedef()))
+        """Janela com todos os parâmetros do controller (e a ajuda de cada um) antes de inserir."""
+        from ..ctrldialog import ControllerDialog
+        if not self.current_edit():
+            return
+        dlg = ControllerDialog(self.ctx, name, self._current_statedef(), parent=self)
+        if dlg.exec() and dlg.result_text:
+            self._insert(dlg.result_text)
+        dlg.deleteLater()
+
+    def edit_controller(self) -> None:
+        """Abre a janela de parâmetros no [State] onde está o cursor e troca o bloco pelo
+        resultado (triggers, comentários e parâmetros desconhecidos ficam)."""
+        from ..ctrldialog import ControllerDialog, parse_block
+        ed = self.current_edit()
+        if not ed:
+            return
+        lines = ed.toPlainText().split("\n")
+        found = parse_block(lines, ed.textCursor().blockNumber())
+        spec = vmod.grammar()["controllers"].get(found[2]["type"].lower()) if found else None
+        if spec is None:
+            name = self._selected_ctrl()
+            if name:          # fora de um [State]: insere o controller escolhido na lista
+                self.insert_controller(name)
+            else:
+                self.ctx.status.emit(tr("Put the cursor inside a [State …] block to edit its parameters"))
+            return
+        start, last, data = found
+        dlg = ControllerDialog(self.ctx, spec["name"], data["statedef"], existing=data, parent=self)
+        if dlg.exec() and dlg.result_text:
+            doc = ed.document()
+            c = QTextCursor(doc.findBlockByNumber(start))
+            end = doc.findBlockByNumber(last)
+            c.beginEditBlock()
+            c.setPosition(end.position() + len(end.text()), QTextCursor.MoveMode.KeepAnchor)
+            c.insertText(dlg.result_text.rstrip("\n"))
+            c.endEditBlock()
+            ed.goto_line(start + 1)
+            self.ctx.status.emit(tr("{0} updated").format(spec["name"]))
+        dlg.deleteLater()
 
     def show_reference(self) -> None:
         name = self._selected_ctrl()
         if name:
             spec = generate.describe_controller(name)
             from ..dialogs import TextDialog
-            body = spec["description"] + tr("\n\nParameters:\n") + "\n".join(
+            body = sctrldocs.doc(spec["description"]) + tr("\n\nParameters:\n") + "\n".join(
                 ("* " if p in spec["required"] else "  ") + v["syntax"] for p, v in spec["params"].items())
             TextDialog(spec["name"], body + tr("\n\n* required"), self).exec()
 

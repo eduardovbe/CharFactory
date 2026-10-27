@@ -3,13 +3,14 @@ de cor, variante por matiz/saturação/brilho e as 12 paletas por faixas de cor,
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
+                               QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
                                QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                                QWidget)
 
@@ -19,7 +20,7 @@ from ...tools import palettes12 as P
 from ..canvas import SpriteCanvas, pil_to_qimage
 from ..context import AppContext, _snapshot
 from ..icons import icon
-from ..widgets import form_row, hint_label
+from ..widgets import Section, form_row, hint_label
 from ...i18n import tr
 
 HIGHLIGHT = (255, 0, 255)     # cor que pisca na prévia nos índices selecionados
@@ -192,6 +193,9 @@ class PaletteEditor(QWidget):
         self.adj: dict[int, dict] = {}  # paleta -> faixa -> (matiz, sat, brilho), desta sessão
         self.adj_origin: dict[int, list] = {}   # paleta -> cores antes do ajuste por faixa
         self._labels: dict[int, str] = {}         # paleta -> tema/harmonia com que foi gerada
+        self._sets: list[dict] = []     # conjuntos prontos da aba 12 paletas (refeitos quando preciso)
+        self._sets_dirty = True
+        self._seeds = (1, 2, 3)         # sementes do Surpresa ("Outras ideias" troca)
         self.poses: list[tuple] = []
 
         # ------------------------------------------------ topo: desfazer e a tira de paletas
@@ -244,8 +248,8 @@ class PaletteEditor(QWidget):
         lv.addWidget(self.grid_title)
         lv.addWidget(self.grid, 1)
         lv.addWidget(self.sel_label)
-        lv.addWidget(hint_label(tr("Click picks a color, Shift+click marks a range and double-click edits it "
-                                   "(the preview follows while you choose).")))
+        self.grid.setToolTip(tr("Click picks a color, Shift+click marks a range and double-click edits it "
+                                "(the preview follows while you choose)."))
 
         # ------------------------------------------------ prévia
         self.preview = SpriteCanvas()
@@ -277,7 +281,6 @@ class PaletteEditor(QWidget):
         mv.addLayout(self.poses_row)
         mv.addWidget(self.preview_note)
         mv.addWidget(self.highlight)
-        mv.addWidget(hint_label(tr("Click the sprite to find its color in the grid.")))
 
         # ------------------------------------------------ abas
         self.tabs = QTabWidget()
@@ -434,53 +437,89 @@ class PaletteEditor(QWidget):
         return self._scroll(w)
 
     def _set_tab(self) -> QWidget:
-        """As 12 paletas de uma vez: faixas de cor da paleta 1, esquema e ajuste por faixa."""
+        """As 12 paletas em passos: o que muda (faixas de cor da paleta 1), os estilos e a
+        intensidade, gerar as ideias e escolher um conjunto vendo a prévia; ajuste fino no fim."""
         w = QWidget()
         v = QVBoxLayout(w)
-        v.addWidget(hint_label(tr("Palette 1 split in color bands (skin, hair, clothes…). Lock what stays "
-                                  "the same in all palettes and generate palettes 2 to 12 with a scheme.")))
+        v.setSpacing(8)
+        v.addWidget(QLabel(tr("<b>1.</b> What changes")))
         self.bands = QTreeWidget()
-        self.bands.setHeaderLabels([tr("Band"), tr("Colors"), tr("Locked")])
+        self.bands.setHeaderLabels([tr("Part"), tr("Colors"), tr("Keep")])
+        self.bands.setToolTip(tr("Parts of palette 1 by color. Check Keep on what stays the same in every "
+                                 "palette (skin, outline…)."))
         self.bands.setRootIsDecorated(False)
         self.bands.setIconSize(QSize(72, 14))
+        self.bands.setMaximumHeight(170)
         self.bands.itemChanged.connect(self._lock_changed)
         self.bands.currentItemChanged.connect(lambda *_: (self._load_adjust(), self.show_preview()))
-        v.addWidget(self.bands, 1)
-        self.scheme = QComboBox()
-        self.scheme.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.scheme.setMinimumContentsLength(12)     # o texto longo do esquema não alarga a aba
-        for key, text in P.SCHEMES.items():
-            self.scheme.addItem(text, key)
-            self.scheme.setItemData(self.scheme.count() - 1, text, Qt.ItemDataRole.ToolTipRole)
-        v.addLayout(form_row(tr("Scheme"), self.scheme))
-        # onde gerar: uma faixa de paletas, e só nos lugares vazios se quiser guardar as feitas
-        self.gen_from = QSpinBox()
-        self.gen_from.setRange(2, 12)
-        self.gen_to = QSpinBox()
-        self.gen_to.setRange(2, 12)
-        self.gen_to.setValue(12)
-        self.gen_from.valueChanged.connect(lambda v: self.gen_to.setValue(max(v, self.gen_to.value())))
-        self.gen_to.valueChanged.connect(lambda v: self.gen_from.setValue(min(v, self.gen_from.value())))
-        rng = QHBoxLayout()
-        rng.addWidget(self.gen_from)
-        rng.addWidget(QLabel(tr("to")))
-        rng.addWidget(self.gen_to)
-        rng.addStretch()
-        v.addLayout(form_row(tr("Palettes"), rng))
-        self.gen_empty = QCheckBox(tr("Only empty slots (keep the palettes already made)"))
-        v.addWidget(self.gen_empty)
+        v.addWidget(self.bands)
+        v.addWidget(QLabel(tr("<b>2.</b> Styles")))
+        # estilos em duas colunas de caixas: cabem sem rolar e deixam espaço para os conjuntos
+        styles = QGridLayout()
+        styles.setHorizontalSpacing(12)
+        styles.setVerticalSpacing(2)
+        self.style_boxes: dict[str, QCheckBox] = {}
+        for n, (key, desc) in enumerate(P.SCHEMES.items()):
+            cb = QCheckBox(P.SCHEME_TITLES[key])
+            cb.setToolTip(desc)
+            cb.setChecked(key in P.DEFAULT_STYLES)
+            cb.toggled.connect(self._options_changed)
+            styles.addWidget(cb, n // 2, n % 2)
+            self.style_boxes[key] = cb
+        v.addLayout(styles)
+        self.strength = QComboBox()
+        for label, k in P.STRENGTHS.items():
+            self.strength.addItem(label, k)
+        self.strength.setCurrentIndex(1)
+        self.strength.currentIndexChanged.connect(self._options_changed)
+        v.addLayout(form_row(tr("Intensity"), self.strength))
+        self.ideas_btn = QPushButton(tr("3. Generate ideas"))
+        self.ideas_btn.setProperty("primary", True)
+        self.ideas_btn.setToolTip(tr("One set of palettes 2 to 12 for each style (and a mix of them); nothing is "
+                                     "saved until you use one"))
+        self.ideas_btn.clicked.connect(self.generate_ideas)
+        v.addWidget(self.ideas_btn)
+        # resultado: só depois de gerar
+        self.results = QWidget()
+        rv = QVBoxLayout(self.results)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(6)
+        head = QHBoxLayout()
+        head.addWidget(QLabel(tr("<b>4.</b> Pick a set")), 1)
+        more = QPushButton(icon("reload"), tr("Other ideas"))
+        more.setToolTip(tr("New random sets in Surprise (the other styles always give the same)"))
+        more.clicked.connect(self.reroll_sets)
+        head.addWidget(more)
+        rv.addLayout(head)
+        self.sets = QListWidget()
+        self.sets.setIconSize(QSize(11 * 28, 38))
+        self.sets.setSpacing(3)
+        self.sets.setMinimumHeight(220)
+        self.sets.setWordWrap(True)
+        self.sets.currentRowChanged.connect(self._set_chosen)
+        self.sets.itemDoubleClicked.connect(lambda _it: self.generate())
+        rv.addWidget(self.sets, 1)
+        self.gen_note = QLabel()
+        self.gen_note.setObjectName("infoChip")
+        self.gen_note.setWordWrap(True)
+        rv.addWidget(self.gen_note)
         self.gen_def = QCheckBox(tr("Also fix the .def so they can be picked in the game"))
         self.gen_def.setToolTip(tr("[Palette Keymap] (buttons x to c) and pal.defaults, only if something "
                                    "was missing"))
         self.gen_def.setChecked(True)
-        v.addWidget(self.gen_def)
-        gen = QPushButton(tr("Generate palettes"))
-        gen.setToolTip(tr("Makes the chosen palettes from palette 1 with the scheme (locked bands stay "
-                          "the same). Ctrl+Z undoes."))
-        gen.clicked.connect(self.generate)
-        v.addWidget(gen)
-        self.adjust_box = QGroupBox(tr("Adjust one band in one palette"))
+        rv.addWidget(self.gen_def)
+        self.gen_btn = QPushButton(tr("Use this set"))
+        self.gen_btn.setProperty("primary", True)
+        self.gen_btn.setToolTip(tr("Saves the chosen set as palettes 2 to 12 (kept parts stay the same). "
+                                   "Ctrl+Z undoes."))
+        self.gen_btn.clicked.connect(self.generate)
+        rv.addWidget(self.gen_btn)
+        self.results.hide()
+        v.addWidget(self.results, 1)
+        # ajuste fino de uma parte numa paleta, recolhido
+        self.adjust_box = QWidget()
         f = QFormLayout(self.adjust_box)
+        f.setContentsMargins(0, 0, 0, 0)
         self.adjust_title = QLabel()
         self.adjust_title.setWordWrap(True)
         f.addRow(self.adjust_title)
@@ -490,8 +529,11 @@ class PaletteEditor(QWidget):
         f.addRow(tr("Hue"), dh_row)
         f.addRow(tr("Saturation"), sm_row)
         f.addRow(tr("Brightness"), bm_row)
-        f.addRow(hint_label(tr("Pick a band above and a palette on the strip; the change shows at once.")))
-        v.addWidget(self.adjust_box)
+        fine = Section(tr("Fine adjustment"), "palettes.fine", collapsed=True)
+        fine.setToolTip(tr("Pick a part above and a palette on the strip; the change shows at once."))
+        fine.add(self.adjust_box)
+        v.addWidget(fine)
+        v.addStretch()
         return self._scroll(w)
 
     def _slider(self, lo: int, hi: int, value: int, suffix: str, on_change):
@@ -634,6 +676,11 @@ class PaletteEditor(QWidget):
         self._history_buttons()
         self._load_adjust()
         self._map_note()
+        self._gen_note()
+        if not keep:                         # outro char: as ideias geradas eram do anterior
+            self._sets = []
+            self.sets.clear()
+            self.results.hide()
         self.refresh()
 
     def _map_note(self) -> None:
@@ -865,13 +912,35 @@ class PaletteEditor(QWidget):
                     colors[i] = HIGHLIGHT
         return colors
 
+    def chosen_set(self) -> dict | None:
+        """Conjunto escolhido na aba 12 paletas (só com a aba aberta, como a variante)."""
+        row = self.sets.currentRow()
+        if self.tabs.currentIndex() != self.TAB_SET or self.results.isHidden() or not 0 <= row < len(self._sets):
+            return None
+        return self._sets[row]
+
+    def set_palettes(self, cand: dict) -> dict[int, list]:
+        base = self._base()
+        return {n: P.adjust(base, self.rngs, a) for n, a in cand["adj"].items()}
+
     def show_preview(self, *_):
         """Sprite da prévia com a paleta como está, ou como a variante vai ficar se os controles
-        de matiz/saturação/brilho saíram do neutro (nada é gravado até 'Criar variante')."""
+        de matiz/saturação/brilho saíram do neutro (nada é gravado até 'Criar variante'). Com um
+        conjunto escolhido na aba 12 paletas, o sprite aparece lado a lado nas 11 paletas dele."""
         key = self.preview_sprite.currentData()
         p = self.current_palette()
         spr = self.char.sprites.find(*key) if key and p is not None else None
         if spr is None:
+            return
+        cand = self.chosen_set()
+        if cand is not None and not self.is_own():
+            self.preview_note.setText(tr("Previewing the set “{0}”, not saved yet: “Use this set” saves it "
+                                         "as palettes 2 to 12.").format(cand["title"]))
+            self.preview_note.show()
+            self.preview.set_image(self._lineup(spr, self.set_palettes(cand)))
+            if ("set", key) != self._shown_key:
+                self.preview.fit()
+                self._shown_key = ("set", key)
             return
         active = self.variant_active()
         if active:
@@ -900,7 +969,13 @@ class PaletteEditor(QWidget):
     def _target_note(self, *_) -> None:
         n = self.target.value()
         exists = self.char is not None and self.char.sprites.find_palette(1, n) >= 0
-        self.target_note.setText(tr("Replaces palette 1,{0}").format(n) if exists else tr("New palette 1,{0}").format(n))
+        users = P.sprite_users(self.char, n) if exists and n != 1 else 0
+        if users:
+            self.target_note.setText(tr("Palette 1,{0} is used by {1} sprites (effects, portraits…): it moves "
+                                        "to another slot and they keep their colors").format(n, users))
+        else:
+            self.target_note.setText(tr("Replaces palette 1,{0}").format(n) if exists else
+                                     tr("New palette 1,{0}").format(n))
         if self.variant_active():
             self.show_preview()
 
@@ -933,7 +1008,8 @@ class PaletteEditor(QWidget):
         """Faixas de cor da paleta 1; as travas escolhidas antes ficam (pelo nome da faixa)."""
         locked = {r["name"]: r["locked"] for r in self.rngs}
         base = self._base()
-        self.rngs = P.ranges(base, P.used_indices(self.char)) if base else []
+        counts = P.index_counts(self.char) if base else {}
+        self.rngs = P.refine_dark(self.char, P.ranges(base, P.used_indices(self.char), counts), base, counts) if base else []
         for r in self.rngs:
             r["locked"] = locked.get(r["name"], r["locked"])
         self._forget_adjust()
@@ -952,47 +1028,141 @@ class PaletteEditor(QWidget):
     def _lock_changed(self, it, col) -> None:
         if col == 2:
             self.rngs[it.data(0, Qt.ItemDataRole.UserRole)]["locked"] = it.checkState(2) == Qt.CheckState.Checked
+            self._options_changed()
 
     def _current_band(self) -> int | None:
         it = self.bands.currentItem()
         return it.data(0, Qt.ItemDataRole.UserRole) if it else None
 
-    def generate(self) -> None:
-        if not self.rngs:
+    SLOTS = range(2, 13)
+
+    def chosen_styles(self) -> list[str]:
+        return [key for key, cb in self.style_boxes.items() if cb.isChecked()]
+
+    def _options_changed(self, *_) -> None:
+        """Mudou o que muda, os estilos ou a intensidade: as ideias geradas deixam de valer."""
+        if not self.results.isHidden():
+            self.results.hide()
+            self._sets = []
+            self.ctx.status.emit(tr("Options changed: generate the ideas again"))
+            self.show_preview()
+
+    def generate_ideas(self) -> None:
+        if not self.char or not self.rngs:
             self.ctx.status.emit(tr("The character does not have palette 1,1"))
             return
-        has = lambda n: self.char.sprites.find_palette(1, n) >= 0
-        slots = [n for n in range(self.gen_from.value(), self.gen_to.value() + 1)
-                 if not (self.gen_empty.isChecked() and has(n))]
-        if not slots:
-            self.ctx.status.emit(tr("No empty palette between {0} and {1}").format(
-                self.gen_from.value(), self.gen_to.value()))
+        if not self.chosen_styles():
+            self.ctx.status.emit(tr("Pick at least one style"))
             return
-        exists = [n for n in slots if has(n)]
-        if exists and QMessageBox.question(
-                self, tr("Generate palettes"),
-                tr("This replaces the palettes the character already has ({0}). Ctrl+Z undoes it. Continue?")
-                .format(", ".join(map(str, exists)))) != QMessageBox.StandardButton.Yes:
+        self._sets_dirty = True
+        self._ensure_sets()
+        self.results.show()
+        self._set_chosen()
+
+    def _ensure_sets(self) -> None:
+        """Monta os conjuntos dos estilos escolhidos, com as miniaturas."""
+        if not self._sets_dirty or not self.char or not self.rngs:
+            return
+        self._sets_dirty = False
+        row = self.sets.currentRow()
+        self._sets = P.candidate_sets(self.rngs, self._seeds, styles=self.chosen_styles(),
+                                      strength=self.strength.currentData())
+        key = self._strip_key()
+        spr = self.char.sprites.find(*key) if key else None
+        self.sets.blockSignals(True)
+        self.sets.clear()
+        for cand in self._sets:
+            it = QListWidgetItem(cand["title"])
+            it.setToolTip(cand["description"])
+            if spr is not None:
+                it.setIcon(QIcon(self._set_icon(spr, self.set_palettes(cand))))
+            self.sets.addItem(it)
+        self.sets.setCurrentRow(row if 0 <= row < len(self._sets) else 0)
+        self.sets.blockSignals(False)
+        self._set_chosen()
+
+    def reroll_sets(self) -> None:
+        self._seeds = tuple(random.randrange(1, 10 ** 6) for _ in range(3))
+        self.generate_ideas()
+        self.ctx.status.emit(tr("New Surprise sets"))
+
+    def _set_icon(self, spr, palettes: dict[int, list]) -> QPixmap:
+        """As 11 paletas do conjunto em miniatura, lado a lado."""
+        size = self.sets.iconSize()
+        cell = QSize(size.width() // 11, size.height())
+        pix = QPixmap(size)
+        pix.fill(Qt.GlobalColor.transparent)
+        qp = QPainter(pix)
+        for k, n in enumerate(sorted(palettes)):
+            img = self.char.sprites.image(spr, sff.Palette(1, n, [tuple(c) for c in palettes[n]])).convert("RGBA")
+            qp.drawPixmap(k * cell.width(), 0, _thumb(img, cell))
+        qp.end()
+        return pix
+
+    def _lineup(self, spr, palettes: dict[int, list]):
+        """O sprite nas 11 paletas, lado a lado (a prévia grande do conjunto)."""
+        from PIL import Image
+        imgs = [self.char.sprites.image(spr, sff.Palette(1, n, [tuple(c) for c in palettes[n]])).convert("RGBA")
+                for n in sorted(palettes)]
+        w, h = imgs[0].size
+        gap = max(4, w // 8)
+        cols = 6
+        rows = (len(imgs) + cols - 1) // cols
+        out = Image.new("RGBA", (cols * w + (cols - 1) * gap, rows * h + (rows - 1) * gap), (0, 0, 0, 0))
+        for k, img in enumerate(imgs):
+            out.paste(img, ((k % cols) * (w + gap), (k // cols) * (h + gap)))
+        return out
+
+    def _set_chosen(self, *_) -> None:
+        self.gen_btn.setEnabled(self.sets.currentRow() >= 0)
+        self.show_preview()
+
+    def _gen_note(self) -> None:
+        """Aviso do que acontece ao usar um conjunto: as paletas 2 a 12 que já existem saem do
+        caminho (vão para 13 em diante) em vez de serem apagadas."""
+        if not self.char:
+            return
+        have = [n for n in self.SLOTS if self.char.sprites.find_palette(1, n) >= 0]
+        if not have:
+            self.gen_note.setText(tr("Fills palettes 2 to 12."))
+            return
+        taken = {p.item for p in self.char_palettes()}
+        dest, m = [], 13
+        for _n in have:
+            while m in taken:
+                m += 1
+            dest.append(m)
+            taken.add(m)
+        span = lambda xs: str(xs[0]) if len(xs) == 1 else f"{xs[0]}–{xs[-1]}" if xs == list(range(xs[0], xs[-1] + 1)) \
+            else ", ".join(map(str, xs))
+        self.gen_note.setText(tr("Palettes {0} already exist: they move to {1}, nothing is lost and the sprites "
+                                 "that use them (effects, portraits…) keep their colors. Ctrl+Z undoes.")
+                              .format(span(have), span(dest)))
+
+    def generate(self) -> None:
+        """Grava o conjunto escolhido como paletas 2 a 12; as que já existiam vão para 13 em diante."""
+        cand = self.chosen_set() if self.tabs.currentIndex() == self.TAB_SET else None
+        if cand is None and 0 <= self.sets.currentRow() < len(self._sets):
+            cand = self._sets[self.sets.currentRow()]
+        if not self.rngs or cand is None:
+            self.ctx.status.emit(tr("The character does not have palette 1,1") if not self.rngs
+                                 else tr("Pick a set first"))
             return
         base = self._base()
-        labels: dict[int, str] = {}
-        # "Surpresa" sorteia de novo a cada clique; os outros esquemas dão sempre o mesmo. As
-        # variações do esquema (2 a 12) vão, em ordem, para as paletas escolhidas
-        made = P.scheme(self.scheme.currentData(), self.rngs, labels=labels)
-        variants = [made[k] for k in sorted(made)]
-        names = [labels.get(k) for k in sorted(made)]
-        self.adj = {n: variants[i] for i, n in enumerate(slots)}
+        moved = P.relocate(self.char, self.SLOTS)
+        self.adj = {n: dict(a) for n, a in cand["adj"].items()}
         self.adj_origin = {n: list(base) for n in self.adj}
-        self._labels.update({n: names[i] for i, n in enumerate(slots) if names[i]})
+        self._labels = {m: self._labels[n] for n, m in moved.items() if n in self._labels}
+        self._labels.update({n: t for n, t in cand["labels"].items() if t})
         P.write(self.char, {n: P.adjust(base, self.rngs, a) for n, a in self.adj.items()})
-        self._want_slot = slots[0]
+        self._want_slot = 2
         label = self._new_label()
         self._done(label)
         fixed = self.fix_def(label) if self.gen_def.isChecked() else []
-        span = f"{slots[0]}" if len(slots) == 1 else f"{slots[0]}–{slots[-1]}"
-        self.ctx.status.emit(tr("Palettes {0} generated · Ctrl+Z undoes").format(span)
-                             + (tr(" · .def fixed") if fixed else "")
-                             + (tr(" · click again for other colors") if self.scheme.currentData() == "sortear" else ""))
+        self.ctx.status.emit(tr("Set “{0}” saved as palettes 2–12 · Ctrl+Z undoes").format(cand["title"])
+                             + (tr(" · old palettes moved to {0}").format(", ".join(map(str, moved.values())))
+                                if moved else "")
+                             + (tr(" · .def fixed") if fixed else ""))
 
     def _load_adjust(self) -> None:
         """Mostra o ajuste da faixa escolhida na paleta escolhida (cada um começa um passo novo
@@ -1087,6 +1257,8 @@ class PaletteEditor(QWidget):
     def make_variant(self) -> None:
         keep = self.selection() if len(self.selection()) > 1 else []
         target = self.target.value()
+        if target != 1 and P.sprite_users(self.char, target):
+            P.relocate(self.char, [target])          # efeito/retrato que usava a 1,N fica com as cores dele
         ops.make_palette_variant(self.char, target, self.hue.value(), self.sat.value() / 100,
                                  self.bri.value() / 100, base=self._slot, keep_indices=keep)
         self.reset_variant()

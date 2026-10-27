@@ -226,9 +226,12 @@ class Stage:
                 and y + img.height <= dst.height else dst.paste(img, (x, y), img)
 
     def render(self, cam_x: float = 0.0, cam_y: float = 0.0, tick: int = 0, layers=(0, 1),
-               players: bool = True, selected: int | None = None, only: int | None = None) -> Image.Image:
-        """Imagem do tamanho de `localcoord` com a câmera em (cam_x, cam_y) no tick `tick`."""
+               players: bool = True, selected: int | None = None, only: int | None = None,
+               width: int | None = None) -> Image.Image:
+        """Imagem do tamanho de `localcoord` com a câmera em (cam_x, cam_y) no tick `tick`.
+        `width` alarga a imagem para os lados (fundo do editor de sprites)."""
         W, H = self.localcoord
+        W = width or W
         k_hi = 0.5 if self.get("StageInfo", "hires", "0") not in ("0", "") else 1.0   # hires: tudo em 2x
         bg = _nums(self.get("BGdef", "bgclearcolor", "0,0,0"), 3)
         im = Image.new("RGBA", (W, H), (int(bg[0]), int(bg[1]), int(bg[2]), 255))

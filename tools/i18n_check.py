@@ -1,5 +1,6 @@
 """Confere as traduções: todo tr("...") do código tem entrada em cada catálogo, as lacunas
 ({0}, {1:.2f}…) são as mesmas nas três línguas e nenhum catálogo guarda texto que o código não usa.
+Confere também os textos da doc dos controllers (charfactory/data/docs_i18n, ver sctrldocs.py).
 
     python tools/i18n_check.py          # relatório; sai com erro se faltar algo
     python tools/i18n_check.py --fix    # também tira dos catálogos as entradas sem uso
@@ -44,35 +45,52 @@ def holes(text: str) -> list[str]:
     return sorted(HOLE.findall(text))
 
 
+def doc_catalog(lang: str) -> dict[str, str]:
+    try:
+        return json.loads((PKG / "data" / "docs_i18n" / f"{lang}.json").read_text("utf-8"))
+    except OSError:
+        return {}
+
+
 def check() -> dict:
     keys = code_keys()
-    report = {"missing": {}, "stale": {}, "holes": {}}
+    sys.path.insert(0, str(ROOT))
+    from charfactory.sctrldocs import english_texts
+    docs = english_texts()
+    report = {"missing": {}, "stale": {}, "holes": {}, "doc missing": {}, "doc stale": {}}
     for lang in LOCALES:
         cat = catalog(lang)
         report["missing"][lang] = sorted(keys - set(cat))
         report["stale"][lang] = sorted(set(cat) - keys)
         report["holes"][lang] = sorted(k for k in keys & set(cat) if holes(k) != holes(cat[k]))
+        dcat = doc_catalog(lang)
+        report["doc missing"][lang] = sorted(docs - set(dcat))
+        report["doc stale"][lang] = sorted(set(dcat) - docs)
     return report
 
 
 def main() -> int:
     r = check()
     bad = False
-    for kind in ("missing", "holes", "stale"):
+    for kind in ("missing", "holes", "stale", "doc missing", "doc stale"):
         for lang, items in r[kind].items():
             if items:
                 print(f"{kind} [{lang}]: {len(items)}")
                 for k in items[:40]:
-                    print("   ", repr(k))
-                bad |= kind != "stale"
+                    print("   ", ascii(k[:160]))
+                bad |= "stale" not in kind
     if "--fix" in sys.argv:
         for lang in LOCALES:
             cat = {k: v for k, v in catalog(lang).items() if k not in set(r["stale"][lang])}
             (PKG / "locale" / f"{lang}.json").write_text(
-                json.dumps(dict(sorted(cat.items())), ensure_ascii=False, indent=1) + "\n", "utf-8")
+                json.dumps(dict(sorted(cat.items())), ensure_ascii=False, indent=1) + "\n", "utf-8", newline="\n")
+            dcat = {k: v for k, v in doc_catalog(lang).items() if k not in set(r["doc stale"][lang])}
+            (PKG / "data" / "docs_i18n" / f"{lang}.json").write_text(
+                json.dumps(dict(sorted(dcat.items())), ensure_ascii=False, indent=1) + "\n", "utf-8", newline="\n")
         print("unused entries removed")
     if not bad:
-        print("translations complete:", len(code_keys()), "texts")
+        print("translations complete:", len(code_keys()), "texts and", len(doc_catalog(LOCALES[0])),
+              "controller doc texts")
     return 1 if bad else 0
 
 

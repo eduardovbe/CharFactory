@@ -305,6 +305,11 @@ QToolButton:checked {{ background: {u['accent_soft']}; color: {u['accent']}; }}
 QToolButton[segment="true"] {{ padding: 4px 9px; font-weight: 600; }}
 QToolButton[segment="true"]:checked {{ background: {u['accent_soft']}; color: {u['accent']}; border: 1px solid {u['accent_soft']}; }}
 QToolButton::menu-indicator {{ image: none; }}
+QToolButton[popupMode="1"] {{ padding-right: 20px; margin-right: 4px; }}
+QToolButton::menu-button {{ width: 16px; border: none; border-left: 1px solid {u['border']};
+                            border-top-right-radius: 6px; border-bottom-right-radius: 6px; margin: 3px 0; }}
+QToolButton::menu-button:hover {{ background: {u['panel_alt']}; }}
+QToolButton::menu-arrow {{ image: url({a}down.svg); width: 10px; height: 10px; }}
 
 QPushButton {{ background: {u['button']}; border: 1px solid {u['border']}; border-radius: 6px; padding: 4px 12px; font-weight: 500; }}
 QPushButton:hover {{ background: {u['button_hover']}; }}

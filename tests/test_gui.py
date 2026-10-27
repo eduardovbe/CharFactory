@@ -897,6 +897,8 @@ def test_mouse_on_axis_palette_wave_trees_and_timeline(gui, monkeypatch):
     ctrls.scrollToItem(ctrl)
     assert ctrls.isVisible()
     before = ed.toPlainText()
+    from charfactory.gui import ctrldialog          # a janela de parâmetros aceita como veio
+    monkeypatch.setattr(ctrldialog.ControllerDialog, "exec", lambda self: self.accept_text() or 1)
     at = ctrls.visualItemRect(ctrl).center()       # clique e duplo clique, como a mão faz
     QTest.mouseClick(ctrls.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at)
     QTest.mouseDClick(ctrls.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at)
@@ -1299,6 +1301,7 @@ def test_palette_editor_generates_the_12_palettes(gui, monkeypatch):
     assert ed.strip.count() == 12 and ed.bands.topLevelItemCount() == len(ed.rngs) > 0
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     ed.tabs.setCurrentIndex(ed.TAB_SET)
+    ed.generate_ideas()
     ed.generate()
     app.processEvents()
     assert all(sff().find_palette(1, n) >= 0 for n in range(2, 13)) and ed.current_slot() == 2
@@ -1406,11 +1409,10 @@ def test_all_palettes_list_and_color_effects(gui):
     ctx.char.dirty.clear()
 
 
-def test_palette_editor_generates_into_chosen_slots_and_fixes_the_def(gui, monkeypatch):
-    """Gerar só nos lugares vazios (7 a 12) sem tocar nas feitas, acertar no .def os botões que
-    levavam todos à paleta 1 e o pal.defaults, e um Ctrl+Z que volta as duas coisas juntas."""
-    from PySide6.QtWidgets import QMessageBox
-
+def test_palette_editor_uses_a_ready_set_and_fixes_the_def(gui):
+    """12 paletas: um conjunto pronto de cada esquema com prévia; usar um grava 2 a 12, as que já
+    existiam vão para 13 em diante sem mudar os sprites que as usam, o .def é acertado e um
+    Ctrl+Z volta tudo junto."""
     from charfactory.gui.editors.palettes import PaletteEditor
     from charfactory.tools import palettes12 as P
     app, ctx, win, _ = gui
@@ -1419,29 +1421,49 @@ def test_palette_editor_generates_into_chosen_slots_and_fixes_the_def(gui, monke
         keymap.set(b, "1")                              # como no Jotaro: todo botão na paleta 1
     ctx.char.definition.section("Info").remove("pal.defaults")
     ctx.changed("def")                                  # como uma edição feita na aba Definições
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    sff = lambda: ctx.char.sprites
+    # um retrato com a 1,3 como paleta própria: não pode mudar de cor
+    portrait = len(sff().sprites) - 1
+    old_index = sff().sprites[portrait].palette_index
+    sff().sprites[portrait].palette_index = sff().find_palette(1, 3)
+    look = sff().image(sff().sprites[portrait]).tobytes()
     ed = PaletteEditor(ctx)
     ed.load()
     assert not ed.map_row.isHidden() and "2, 3, 4, 5, 6" in ed.map_note.text()
-    sff = lambda: ctx.char.sprites
     before = {n: list(sff().palettes[sff().find_palette(1, n)].colors) for n in range(1, 7)}
     ed.tabs.setCurrentIndex(ed.TAB_SET)
-    ed.gen_from.setValue(2)
-    ed.gen_to.setValue(12)
-    ed.gen_empty.setChecked(True)                       # o kfm tem 1 a 6: só 7 a 12 são novas
+    app.processEvents()
+    assert ed.results.isHidden() and ed.sets.count() == 0          # as ideias só aparecem depois de gerar
+    assert set(ed.chosen_styles()) == set(P.DEFAULT_STYLES)
+    ed.generate_ideas()
+    assert not ed.results.isHidden() and ed.sets.item(0).text() == P.SCHEME_TITLES["mistura"]
+    assert ed.sets.count() == len(P.candidate_sets(ed.rngs, styles=ed.chosen_styles()))
+    assert not ed.sets.item(0).icon().isNull()
+    assert "2–6" in ed.gen_note.text() and "13–17" in ed.gen_note.text()
+    ed.sets.setCurrentRow(1)
+    assert not ed.preview_note.isHidden() and ed.sets.item(1).text() in ed.preview_note.text()
+    ed.strength.setCurrentIndex(2)                       # mudar uma opção pede para gerar de novo
+    assert ed.results.isHidden()
+    ed.generate_ideas()
+    ed.sets.setCurrentRow(1)
     ed.generate()
     app.processEvents()
-    assert all(sff().find_palette(1, n) >= 0 for n in range(7, 13))
-    assert all(sff().palettes[sff().find_palette(1, n)].colors == before[n] for n in range(1, 7))
+    assert all(sff().find_palette(1, n) >= 0 for n in range(1, 18))
+    assert all(sff().palettes[sff().find_palette(1, n + 11)].colors == before[n] for n in range(2, 7))
+    assert sff().palettes[sff().find_palette(1, 1)].colors == before[1]
+    assert sff().palettes[sff().find_palette(1, 2)].colors != before[2]
+    assert sff().image(sff().sprites[portrait]).tobytes() == look        # o retrato não mudou
     m = P.def_mapping(ctx.char)
-    assert not m["problems"] and m["keymap"]["c"] == 6 and m["defaults"] == [1, 2, 3, 4]
+    assert not m["problems"] and m["keymap"]["c"] == 6
     assert ed.map_row.isHidden()
     ed.undo()                                           # um clique: paletas e .def voltam
     app.processEvents()
-    assert sff().find_palette(1, 7) < 0
+    assert sff().find_palette(1, 13) < 0
+    assert sff().palettes[sff().find_palette(1, 2)].colors == before[2]
     assert P.def_mapping(ctx.char)["keymap"]["c"] == 1 and not ed.map_row.isHidden()
     ed.fix_def()                                        # o botão do aviso
     assert not P.def_mapping(ctx.char)["problems"]
+    sff().sprites[portrait].palette_index = old_index
     ed.deleteLater()
     ctx.char.dirty.clear()
 
@@ -1508,7 +1530,7 @@ def test_find_searches_only_the_open_tab(gui, monkeypatch):
     def search(page, text):
         win.show_page(page)
         app.processEvents()
-        win.find_text()
+        win.goto_anything()
         pal = seen[-1]
         pal.edit.setText(text)
         return pal, [pal.entries[pal.list.item(k).data(Qt.ItemDataRole.UserRole)][0] for k in range(pal.list.count())]
@@ -1538,8 +1560,12 @@ def test_find_searches_only_the_open_tab(gui, monkeypatch):
     assert rows and rows[0].startswith("200")
     win.show_page(win.defs)                                    # Definições: só o texto
     n = len(seen)
+    win.goto_anything()
+    assert len(seen) == n and win.defs.find_bar.isVisible()
+    win.show_page(win.states)                                  # Ctrl+F no código: a barra de busca
+    n = len(seen)
     win.find_text()
-    assert len(seen) == n
+    assert len(seen) == n and win.states.find_bar.isVisible()
 
 
 def test_run_profiles_dialog_edits_previews_and_runs(gui, monkeypatch):
@@ -1600,3 +1626,329 @@ def test_import_dialog_embedded_palette_and_big_image(gui, tmp_path):
         app.processEvents()
     assert ctx.char.sprites.find(7301, 0) is not None
     ctx.char.dirty.clear()
+
+
+def test_grammar_documents_every_parameter():
+    """Cada parâmetro traz o texto da doc, o padrão e as opções; o Helper ganha os size.*."""
+    from charfactory import validate
+    g = validate.grammar()["controllers"]
+    explod = g["explod"]["params"]
+    assert [c[0] for c in explod["postype"]["choices"]][:2] == ["p1", "p2"] and explod["postype"]["default"] == "p1"
+    assert "offset" in explod["pos"]["doc"] and explod["removetime"]["default"] == "-2"
+    helper = g["helper"]["params"]
+    assert {"size.xscale", "size.height", "size.head.pos"} <= set(helper)
+    assert "root's CNS" in helper["size.xscale"]["doc"]          # "See below." herda o texto seguinte
+    documented = sum(1 for c in g.values() for p in c["params"].values() if p.get("doc"))
+    assert documented == sum(len(c["params"]) for c in g.values())
+    # obsoleto é só o controller que a doc diz que é, não quem tem um parâmetro obsoleto
+    assert {k for k, c in g.items() if c["deprecated"]} == {"gamemakeanim", "hitvelset", "makedust"}
+    assert helper["helpertype"]["deprecated"] and explod["supermove"]["deprecated"]
+    # todo parâmetro só do IKEMEN GO que a janela mostra tem descrição
+    from charfactory import sctrldocs
+    from charfactory.gui.ctrldialog import COMMON, ikemen_params
+    docs = sctrldocs.ikemen_docs()
+    missing = [f"{k}.{p}" for k, c in g.items() for p in ikemen_params().get(k, {}).get("params", [])
+               if p not in c["params"] and p not in COMMON and not docs.get(k, {}).get(p, {}).get("doc")]
+    assert not missing, missing[:10]
+    assert "z velocity" in docs["hitdef"]["air.velocity"]["doc"]       # nota do IKEMEN num parâmetro do MUGEN
+
+
+def test_controller_dialog_lists_every_parameter_and_edits_in_place(gui):
+    """A janela mostra todos os parâmetros (e os do IKEMEN à parte), digitar marca o parâmetro,
+    os não usados podem ir comentados, e editar um [State] mantém triggers, comentários e o que
+    a janela não conhece."""
+    from charfactory.gui.ctrldialog import ControllerDialog, parse_block
+    app, ctx, win, _ = gui
+    dlg = ControllerDialog(ctx, "Explod", 1000)
+    assert {"anim", "pos", "postype", "removetime", "scale", "ownpal"} <= set(dlg.rows)
+    assert dlg.rows["anim"]["required"] and dlg.rows["anim"]["check"].isChecked()
+    assert any(r["spec"].get("ikemen") for r in dlg.rows.values())          # angle, layerno…
+    assert "Missing a value: anim" in dlg.missing.text()
+    dlg.rows["anim"]["edit"].setEditText("7000")
+    dlg.rows["pos"]["edit"].setText("40, -60")
+    assert dlg.rows["pos"]["check"].isChecked()                            # digitar já marca
+    dlg.show_help("postype")
+    assert "p2" in dlg.help.toPlainText() and "default" in dlg.help.toPlainText().lower()
+    dlg.comment_rest.setChecked(True)
+    text = dlg.text()
+    assert text.startswith("[State 1000, Explod]\ntype = Explod\ntrigger1 = Time = 0\n")
+    assert "anim = 7000" in text and "pos = 40, -60" in text and ";removetime = -2" in text
+    assert "angle" not in text                       # os do IKEMEN não entram comentados
+    dlg.comment_rest.setChecked(False)
+    assert ";removetime" not in dlg.text()
+
+    lines = ["[Statedef 200]", "type = S", "", "[State 200, spark]  ; faísca", "type = Explod",
+             "triggerall = var(1)", "trigger1 = AnimElem = 3", "; perto da mão", "anim = 7001",
+             "ID = 5  ; o id", "pos = 10, -20", "zzz = 1", "", "[State 200, end]", "type = ChangeState"]
+    start, last, data = parse_block(lines, 8)
+    assert (start, last) == (3, 11) and data["type"] == "Explod" and data["label"] == "spark"
+    edit = ControllerDialog(ctx, "Explod", 200, existing=data)
+    assert edit.rows["id"]["check"].isChecked() and edit.value("pos") == "10, -20"
+    edit.rows["pos"]["edit"].setText("12, -20")
+    edit.rows["removetime"]["check"].setChecked(True)
+    out = edit.text().split("\n")
+    assert out[:4] == ["[State 200, spark]", "type = Explod", "triggerall = var(1)", "trigger1 = AnimElem = 3"]
+    assert "ID = 5  ; o id" in out and "pos = 12, -20" in out and "removetime = -2" in out
+    assert "zzz = 1" in out and "; perto da mão" in out
+
+
+def test_controller_dialog_from_the_states_page(gui, monkeypatch):
+    """Inserir pelo painel e Ctrl+Shift+Espaço no [State] trocam o bloco pelo resultado."""
+    from charfactory.gui import ctrldialog
+    app, ctx, win, _ = gui
+    win.show_page(win.states)
+    app.processEvents()
+    ed = win.states.current_edit()
+    lines = ed.toPlainText().split("\n")
+    k = next(i for i, t in enumerate(lines) if t.strip().lower() == "type = velset")
+    ed.goto_line(k + 1)
+
+    def fake_exec(self):
+        if "x" in self.rows:
+            self.rows["x"]["edit"].setText("9")
+        self.accept_text()
+        return 1
+    monkeypatch.setattr(ctrldialog.ControllerDialog, "exec", fake_exec)
+    win.states.edit_controller()
+    block = ed.toPlainText().split("\n")
+    start = next(i for i in range(k, -1, -1) if block[i].lstrip().startswith("["))
+    end = next(i for i in range(start + 1, len(block)) if block[i].lstrip().startswith("["))
+    assert "x = 9" in block[start:end] and block[start + 1].lower() == "type = velset"
+    n = ed.blockCount()
+    win.states.insert_controller("PlaySnd")
+    assert ed.blockCount() > n and "type = PlaySnd" in ed.toPlainText()
+
+
+def test_find_bar_searches_any_text_as_you_type(gui):
+    """Ctrl+F nas abas de código: barra embutida que marca tudo, conta, anda e substitui."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    app, ctx, win, _ = gui
+    win.show_page(win.states)
+    app.processEvents()
+    ed = win.states.current_edit()
+    bar = win.states.find_bar
+    win.find_text()
+    assert bar.isVisible()
+    total = ed.toPlainText().lower().count("velset")
+    bar.find_edit.setText("velset")
+    assert len(bar.hits) == total > 1 and bar.count.text() == f"{bar.current + 1} of {total}"
+    assert ed.textCursor().selectedText().lower() == "velset" and ed.search_hits
+    first = bar.current
+    QTest.keyClick(bar.find_edit, Qt.Key.Key_Return)
+    assert bar.current == (first + 1) % total
+    QTest.keyClick(bar.find_edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    assert bar.current == first
+    bar.toggles["case"].setChecked(True)
+    assert len(bar.hits) == ed.toPlainText().count("velset")
+    bar.toggles["case"].setChecked(False)
+    bar.toggles["regex"].setChecked(True)
+    bar.find_edit.setText(r"vel(set|add)")
+    assert len(bar.hits) >= total
+    bar.find_edit.setText("(")
+    assert bar.count.text() == "invalid expression" and not ed.search_hits
+    bar.toggles["regex"].setChecked(False)
+    bar.find_edit.setText("palavra que nao existe")
+    assert bar.count.text() == "no results"
+    ed.fold_all()                                    # achado dentro de bloco dobrado desdobra
+    bar.find_edit.setText("velset")
+    assert ed.textCursor().block().isVisible()
+    win.find_text(replace=True)
+    bar.repl_edit.setText("VelSet")
+    bar.replace_all()
+    assert ed.toPlainText().count("VelSet") == total
+    QTest.keyClick(bar.find_edit, Qt.Key.Key_Escape)
+    assert not bar.isVisible() and not ed.search_hits
+    ed.document().undo()
+
+
+def test_sprite_canvas_drags_the_sprite_without_ctrl(gui):
+    """Editor de sprites: arrastar a figura muda o eixo (Shift trava num eixo), arrastar o vazio
+    move a vista; com fundo de stage o eixo fica parado no chão ao trocar de sprite."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtTest import QTest
+    app, ctx, win, _ = gui
+    win.show_page(win.sprites)
+    app.processEvents()
+    sp = win.sprites
+    ctx.settings["backdrop"] = {"kind": "simple"}
+    win.apply_backdrop()
+    cv = sp.canvas
+    assert cv.backdrop["kind"] == "simple" and not cv.center_image
+    cv.resize(800, 600)
+    sp.nav.set_index(1)
+    cv.fit()
+    spr = sp.current()
+    ax, ay = spr.axis_x, spr.axis_y
+    c = cv._sprite_rect().center()
+    to = c + QPointF(6 * cv.zoom, -3 * cv.zoom)
+    QTest.mousePress(cv, Qt.MouseButton.LeftButton, pos=c.toPoint())
+    QTest.mouseMove(cv, to.toPoint())
+    QTest.mouseRelease(cv, Qt.MouseButton.LeftButton, pos=to.toPoint())
+    spr = sp.current()
+    assert (spr.axis_x, spr.axis_y) == (ax - 6, ay + 3)
+    # Shift: só na direção que andou mais
+    c = cv._sprite_rect().center()
+    QTest.mousePress(cv, Qt.MouseButton.LeftButton, pos=c.toPoint())
+    end = c + QPointF(8 * cv.zoom, 3 * cv.zoom)
+    cv.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, end, end, Qt.MouseButton.LeftButton,
+                                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.ShiftModifier))
+    spr = sp.current()
+    assert (spr.axis_x, spr.axis_y) == (ax - 14, ay + 3)
+    # o vazio move a vista
+    pan = QPointF(cv.pan)
+    QTest.mousePress(cv, Qt.MouseButton.LeftButton, pos=QPointF(60, 60).toPoint())
+    QTest.mouseMove(cv, QPointF(90, 70).toPoint())
+    QTest.mouseRelease(cv, Qt.MouseButton.LeftButton, pos=QPointF(90, 70).toPoint())
+    assert cv.pan != pan
+    pan = QPointF(cv.pan)
+    sp.nav.set_index(2)                       # trocar de sprite não mexe na vista
+    assert cv.pan == pan
+    ctx.settings["backdrop"] = {"kind": "none"}
+    win.apply_backdrop()
+    assert cv.center_image and cv.backdrop is None and win.anims.canvas.backdrop is None
+    ctx.char.dirty.clear()
+
+
+def test_stage_backdrop_puts_the_stage_ground_on_the_axis(gui, mugen_dir):
+    from charfactory.gui import backdrop
+    app, ctx, win, _ = gui
+    ctx.settings["mugen_dir"] = str(mugen_dir)
+    ctx.settings["backdrop"] = {"kind": "stage", "path": str(mugen_dir / "stages" / "stage0.def")}
+    bg, warn = backdrop.build(ctx)
+    assert not warn and bg["kind"] == "image" and bg["image"].width() > 320
+    # o zoffset do stage (a altura do chão na tela) cai no y = 0 do personagem
+    from charfactory.tools.stage import Stage
+    zoff = float(Stage(mugen_dir / "stages" / "stage0.def").get("StageInfo", "zoffset"))
+    assert bg["pos"][1] == -zoff * bg["scale"]
+    ctx.settings["backdrop"] = {"kind": "stage", "path": str(mugen_dir / "nao-existe.def")}
+    bg, warn = backdrop.build(ctx)
+    assert bg["kind"] == "simple" and warn
+
+
+def test_timeline_drags_frame_edges_like_a_video_editor(gui):
+    """Arrastar a borda de um frame muda o tempo dele; Shift+arrastar estica/comprime tudo; Esc cancela."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtTest import QTest
+    from charfactory.gui.widgets import Timeline
+    app, ctx, win, _ = gui
+    win.show_page(win.anims)
+    app.processEvents()
+    an = win.anims
+    tl = an.timeline
+    tl.resize(900, tl.height())
+    a = an.action()
+    times = [f.time for f in a.frames]
+    assert len(times) > 2 and all(t > 0 for t in times[:-1])
+    scale = (tl.width() - tl.LEFT - 12) / sum(tl.durations)
+    edge = QPointF(tl.LEFT + times[0] * scale, 40)
+    assert tl._edge_at(edge.x()) == 0
+    QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=edge.toPoint())
+    to = edge + QPointF(3 * scale, 0)
+    QTest.mouseMove(tl, to.toPoint())
+    QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=to.toPoint())
+    assert a.frames[0].time == times[0] + 3 and [f.time for f in a.frames[1:]] == times[1:]
+    assert ctx.undo()
+    a = an.action()
+    assert [f.time for f in a.frames] == times
+    # Shift na borda do último finito: tudo na mesma proporção
+    an.show_action()
+    k = len(times) - 2 if times[-1] < 0 else len(times) - 1
+    end = sum(max(1, t) for t in times[:k + 1])
+    scale = (tl.width() - tl.LEFT - 12) / sum(tl.durations)
+    p0 = QPointF(tl.LEFT + end * scale, 40)
+    tl.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, p0, p0, Qt.MouseButton.LeftButton,
+                                   Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier))
+    p1 = QPointF(p0.x() - end * scale / 2, 40)      # comprime para a metade
+    tl.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, p1, p1, Qt.MouseButton.NoButton,
+                                  Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier))
+    tl.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, p1, p1, Qt.MouseButton.LeftButton,
+                                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.ShiftModifier))
+    new = [f.time for f in a.frames]
+    assert abs(sum(new) - sum(times) / 2) <= 1 and all(abs(n - t / 2) <= 1 for n, t in zip(new, times))
+    assert ctx.undo()
+    a = an.action()
+    # Esc no meio do arrasto devolve os tempos
+    an.show_action()
+    QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=edge.toPoint())
+    QTest.mouseMove(tl, (edge + QPointF(5 * scale, 0)).toPoint())
+    QTest.keyClick(tl, Qt.Key.Key_Escape)
+    QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=(edge + QPointF(5 * scale, 0)).toPoint())
+    assert [f.time for f in a.frames] == times
+    assert Timeline.stretch([3, 3, 3, -1], 0.5) == [2, 1, 2, -1]
+    # arrastar o meio do 1º frame para depois do 3º muda a ordem; o início do loop segue o frame dele
+    an.show_action()
+    first, third = a.frames[0], a.frames[2]
+    scale = (tl.width() - tl.LEFT - 12) / sum(tl.durations)
+
+    def ev(kind, x, buttons):
+        pt = QPointF(x, 40)
+        return QMouseEvent(kind, pt, pt, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+    mid0 = tl.LEFT + times[0] * scale / 2
+    drop = tl.LEFT + (sum(times[:3]) + times[3] * 0.25) * scale
+    tl.mousePressEvent(ev(QEvent.Type.MouseButtonPress, mid0, Qt.MouseButton.LeftButton))
+    tl.mouseMoveEvent(ev(QEvent.Type.MouseMove, drop, Qt.MouseButton.LeftButton))
+    assert tl._move["active"] and tl._move["dest"] == 3
+    tl.mouseReleaseEvent(ev(QEvent.Type.MouseButtonRelease, drop, Qt.MouseButton.NoButton))
+    a = an.action()
+    assert a.frames[2] is first and a.frames[1] is third and an.frame_nav.index() == 2
+    assert ctx.undo()
+    a = an.action()
+    assert [f.time for f in a.frames] == times
+    # dividir no tick clicado e o menu do clique direito
+    an.show_action()
+    an.split_frame(0, 4)
+    a = an.action()
+    assert [f.time for f in a.frames[:2]] == [4, times[0] - 4] and len(a.frames) == len(times) + 1
+    assert ctx.undo()
+    an.show_action()
+    got = []
+    tl.menuRequested.disconnect()
+    tl.menuRequested.connect(lambda i, t, pos: got.append((i, t)))
+    pt = QPointF(tl.LEFT + (times[0] + 2.5) * scale, 40)
+    tl.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, pt, pt, Qt.MouseButton.RightButton,
+                                   Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier))
+    assert got == [(1, 2)]
+    tl.menuRequested.disconnect()
+    tl.menuRequested.connect(an.frame_menu)
+    ctx.char.dirty.clear()
+
+
+def test_run_uses_the_unsaved_edits_without_saving(gui, monkeypatch):
+    """Rodar com mudanças não salvas: o motor recebe uma cópia de teste (chars/kfm__teste) com o
+    que está editado, os arquivos do projeto ficam como estavam e o char continua por salvar."""
+    from charfactory.gui import app as app_mod
+    app, ctx, win, work = gui
+    root = work.parent.parent
+    (root / "mugen.exe").write_bytes(b"")
+    calls = []
+
+    class FakeProc:
+        pid = 7
+        stdout = iter(())
+
+        def __init__(self, args, **kw):
+            calls.append(args)
+
+        def poll(self):
+            return 0
+    monkeypatch.setattr(app_mod.subprocess, "Popen", FakeProc)
+    air = work / "kfm.air"
+    before = air.read_bytes()
+    a = ctx.char.anims.get(0)
+    old = a.frames[0].time
+    a.frames[0].time = old + 7
+    ctx.changed("anims")
+    win.run_mugen("mugen")
+    assert calls and calls[-1][1] == "kfm__teste/kfm.def"
+    test = work.parent / "kfm__teste"
+    assert (test / "kfm.sff").exists() and (test / "kfm.def").exists()
+    from charfactory import project
+    assert project.load(test / "kfm.def").anims.get(0).frames[0].time == old + 7
+    assert air.read_bytes() == before and "anims" in ctx.char.dirty
+    ctx.char.dirty.clear()
+    a.frames[0].time = old
+    win.run_mugen("mugen")                               # salvo: roda o original de novo
+    assert calls[-1][1] == "kfm/kfm.def"

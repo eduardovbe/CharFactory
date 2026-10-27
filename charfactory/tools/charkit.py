@@ -50,6 +50,41 @@ def default_stage(root: str | Path) -> str | None:
     return defs[0].name if defs else None
 
 
+TEST_SUFFIX = "__teste"
+_SKIP = ("_backups", "build", "__pycache__")
+
+
+def sync_copy(src: Path, dst: Path) -> int:
+    """Deixa `dst` igual a `src` copiando só o que mudou (tamanho ou data): o SFF de um char
+    passa de dezenas de MB e copiar tudo a cada teste demorava."""
+    n = 0
+    for f in src.rglob("*"):
+        rel = f.relative_to(src)
+        if not f.is_file() or f.suffix.lower() == ".bak" or any(part in _SKIP or part.endswith(TEST_SUFFIX)
+                                                                for part in rel.parts):
+            continue
+        out = dst / rel
+        st = f.stat()
+        if out.exists():
+            o = out.stat()
+            if o.st_size == st.st_size and int(o.st_mtime) == int(st.st_mtime):
+                continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, out)
+        n += 1
+    return n
+
+
+def test_copy(char: Character, dst: Path | None = None) -> Path:
+    """Cópia do char com o que está editado e ainda não foi salvo, para rodar no motor sem
+    gravar nada nos arquivos do projeto: a pasta irmã <pasta>__teste (na mesma altura dentro
+    de chars/, para os caminhos relativos do .def valerem igual)."""
+    dst = Path(dst) if dst else char.dir.parent / (char.dir.name + TEST_SUFFIX)
+    sync_copy(char.dir, dst)
+    char.save_to(dst, set(char.dirty))
+    return dst
+
+
 def install(src_dir: str | Path, mugen_root: str | Path, folder: str | None = None,
             ignore: tuple[str, ...] = ("build", "*.bak", "=", "__pycache__")) -> dict:
     """Copia a pasta do personagem para chars/<folder> (substitui a cópia anterior)."""

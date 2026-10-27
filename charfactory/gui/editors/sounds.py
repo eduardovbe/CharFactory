@@ -257,8 +257,7 @@ class SoundEditor(QWidget):
             ("reverse", tr("Reverse the selection (back to front)"), lambda: self.range_op("reverse")),
         ])
         sel_sec = Section(tr("Selection"), "sounds.selection")
-        sel_sec.add(hint_label(tr("Drag on the wave to select; a click sets the cursor (where Paste inserts). The mouse wheel zooms.")),
-                    form_row(tr("Start"), self.sel_a), form_row(tr("End"), self.sel_b), form_row(tr("Cursor"), self.cur),
+        sel_sec.add(form_row(tr("Start"), self.sel_a), form_row(tr("End"), self.sel_b), form_row(tr("Cursor"), self.cur),
                     self.sel_info, self.sel_tools)
         self.volume = QDoubleSpinBox(); self.volume.setRange(0, 4); self.volume.setSingleStep(0.1); self.volume.setValue(1)
         self.volume.setPrefix("× ")
@@ -268,9 +267,9 @@ class SoundEditor(QWidget):
         compact(self.volume, self.fade_in, self.fade_out, self.rate)
         apply = QPushButton(tr("Apply edit"))
         apply.clicked.connect(self.apply_edit)
+        apply.setToolTip(tr("They act on the whole sound (volume acts only on the selection, if any)."))
         ed_sec = Section(tr("Volume, fade and rate"), "sounds.edit")
-        ed_sec.add(hint_label(tr("They act on the whole sound (volume acts only on the selection, if any).")),
-                   form_row(tr("Volume"), self.volume), form_row(tr("Fade in"), self.fade_in),
+        ed_sec.add(form_row(tr("Volume"), self.volume), form_row(tr("Fade in"), self.fade_in),
                    form_row(tr("Fade out"), self.fade_out), form_row(tr("Resample"), self.rate), apply)
         content = QWidget()
         lv = QVBoxLayout(content)
@@ -281,6 +280,7 @@ class SoundEditor(QWidget):
 
         self.file_tab = DocStrip()
         self.wave = Waveform()
+        self.wave.setToolTip(tr("Drag on the wave to select; a click sets the cursor (where Paste inserts). The mouse wheel zooms."))
         self.wave.selectionChanged.connect(self.on_wave_sel)
         self.wave.cursorMoved.connect(lambda i: (self.cur.blockSignals(True), self.cur.setValue(i),
                                                  self.cur.blockSignals(False)))

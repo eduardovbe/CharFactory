@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog
 from ..canvas import pil_to_qimage
 from ..context import AppContext
 from ..icons import icon
-from ..widgets import DocStrip, Section, SidePanel, compact, form_row, hint_label, tool_bar
+from ..widgets import DocStrip, Section, SidePanel, compact, form_row, tool_bar
 from ...i18n import tr
 
 
@@ -501,17 +501,31 @@ class SimulatorPage(QWidget):
                   form_row(tr("Compare"), self.compare), run)
         view = Section(tr("Display"), "sim.view")
         view.add(form_row(tr("Zoom"), self.zoom), self.boxes, self.p2, self.sound, self.player)
+        # dano do golpe: cada acerto/defesa, total, vida que sobra ao P2 e energia
+        self.damage = QLabel()
+        self.damage.setObjectName("dim")
+        self.damage.setToolTip(tr("Damage × the attack of [Data]; P2 has defence 100 and 1000 of life. Pause P1/P2 "
+                                  "and stun (hittime) in ticks."))
+        self.damage.setWordWrap(True)
+        self.damage.setTextFormat(Qt.TextFormat.RichText)
+        self.damage.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        damage = Section(tr("Damage of the move"), "sim.damage")
+        damage.add(self.damage)
+        damage.hide()                   # só aparece com uma simulação pronta
+        self.damage_sec = damage
         events = Section(tr("Events and problems"), "sim.events")
         self.ask_btn = QPushButton(icon("ai"), tr("Ask the AI to fix this move"))
         self.ask_btn.setToolTip(tr("Opens the assistant with the frame data and the problems of this simulation"))
         self.ask_btn.clicked.connect(self.ask_ai)
         self.ask_btn.setEnabled(False)
-        events.add(hint_label(tr("Click an event to go to its tick.")), self.events, self.ask_btn)
+        self.events.setToolTip(tr("Click an event to go to its tick."))
+        events.add(self.events, self.ask_btn)
         self.events.setMinimumHeight(180)
         content = QWidget()
         lv = QVBoxLayout(content)
         lv.addWidget(setup)
         lv.addWidget(self.info)
+        lv.addWidget(damage)
         lv.addWidget(view)
         lv.addWidget(events, 1)
         self.left = SidePanel(tr("Simulator"), content, header=False)
@@ -607,6 +621,7 @@ class SimulatorPage(QWidget):
         self._failed.clear()
         self._audit_item = None
         self.events.clear()
+        self.damage_sec.hide()
         self.view.set_message(*TickView.placeholder)
         self.timeline.set_data(None)
         self.fd_label.setText("")
@@ -780,6 +795,8 @@ class SimulatorPage(QWidget):
         self.timeline.set_data(tl)
         self.fd_label.setText(self._chain_text(simulate.chain_report(sim)) if sim.chain
                               else self._fd_text(tl["frame_data"]))
+        self.damage.setText(self._damage_text(simulate.damage_report(sim)))
+        self.damage_sec.show()
         ab = self.sim_b is not None
         self.view_b.setVisible(ab)
         self.ab_label.setVisible(ab)
@@ -849,6 +866,27 @@ class SimulatorPage(QWidget):
                 + "Look at the move (get_move, simulate_state with a picture) and fix what is wrong; "
                   "tell me what you changed.")
         self.ctx.ask_ai.emit(text)
+
+    @staticmethod
+    def _damage_text(r: dict) -> str:
+        """Dano total, vida que sobra ao P2 e energia, com uma linha por acerto ou defesa."""
+        if not r["rows"]:
+            return tr("The move did not touch P2: no damage.")
+        head = tr("<b>{0}</b> damage ({1}% of the life) · P2 is left with <b>{2}</b>/1000").format(
+            r["total"], r["percent"], r["life"])
+        power = tr("Power: P1 <b>+{0}</b> · P2 <b>+{1}</b>").format(r["p1power"], r["p2power"])
+        cells = "".join(f"<th align='left'>{h}</th>" for h in
+                        (tr("tick"), "", tr("damage"), tr("power"), tr("pause"), tr("stun"), "attr"))
+        rows = []
+        for e in r["rows"]:
+            hit = e["kind"] == "acerto"
+            kind = tr("hit") if hit else tr("guard")
+            rows.append("<tr>" + "".join(f"<td>{v}</td>" for v in (
+                e["t"], kind, e.get("dealt", 0), f"+{e.get('p1power', 0)}", "/".join(map(str, e.get("pause", []))),
+                e.get("hittime", ""), e.get("attr", ""))) + "</tr>")
+        table = (f"<table cellspacing='4' cellpadding='0' style='margin-top:4px'><tr>{cells}</tr>"
+                 + "".join(rows) + "</table>")
+        return f"{head}<br>{power}{table}"
 
     @staticmethod
     def _chain_text(r: dict) -> str:
@@ -941,6 +979,9 @@ class SimulatorPage(QWidget):
         self.timeline.set_current(i)
         p1 = rec["ents"][0] if rec["ents"] else None
         where = tr(" · state {0} anim {1} frame {2}").format(p1['state'], p1['anim'], p1['elem']) if p1 else ""
+        from ...tools import simulate
+        life = simulate.life_at(self.sim, rec["t"])
+        where += tr(" · P2 life {0}").format(life) if life < 1000 else ""
         self.tick_label.setText(f"tick {rec['t']} / {self.sim.track[-1]['t']}{where}")
         img = self.cache.get(self._key(i))
         if img is not None:

@@ -514,6 +514,7 @@ class MainWindow(QMainWindow):
         self.act(e, tr("Find…"), self.find_text, "Ctrl+F", "find")
         self.act(e, tr("Replace…"), lambda: self.find_text(replace=True), "Ctrl+H", "replace")
         self.act(e, tr("Find and replace in all files…"), self.find_in_files, "Ctrl+Shift+F", "find_files")
+        self.act(e, tr("Go to statedef, command, animation, sprite…"), self.goto_anything, "Ctrl+Shift+G", "goto")
         self.act(e, tr("Go to line…"), self.goto_line, "Ctrl+G", "goto_line")
         e.addSeparator()
         self.act(e, tr("Toggle comment on selection"), self.toggle_comment, "Ctrl+;", "comment")
@@ -621,6 +622,9 @@ class MainWindow(QMainWindow):
                 self.act(menu, tr("Save animation GIF…"), self.anims.export_gif)
                 self.act(menu, tr("Import animations from another project…"), lambda: self.import_from_project("anims"))
             elif page is self.states:
+                # o atalho é da página (QShortcut); aqui vai só escrito
+                self.act(menu, tr("Controller parameters (at the cursor)…\tCtrl+Shift+Space"),
+                         self.states.edit_controller, None, "edit")
                 menu.addActions([tool["wizard"], tool["palfx"], tool["offset"], tool["throw"]])
                 self.act(menu, tr("Insert variable usage log"), self.insert_var_log, None, "var_log")
                 self.act(menu, tr("Variable usage list…"), self.var_list, None, "var_list")
@@ -724,7 +728,8 @@ class MainWindow(QMainWindow):
             self._extra_sep.setVisible(on)
         # desfazer/recortar/copiar/colar ficam no menu Editar e nos atalhos de sempre
         if page in self.code_pages:
-            items = [("find", tr("Find (Ctrl+F)"), self.find_text),
+            items = [("find", tr("Find in the file (Ctrl+F)"), self.find_text),
+                     ("goto", tr("Go to statedef, command or animation (Ctrl+Shift+G)"), self.goto_anything),
                      ("goto_line", tr("Go to line (Ctrl+G)"), self.goto_line), None,
                      ("prev_error", tr("Previous problem (Ctrl+Shift+F8)"), lambda: self.jump_issue(-1)),
                      ("next_error", tr("Next problem (Ctrl+F8)"), lambda: self.jump_issue(1)),
@@ -765,6 +770,14 @@ class MainWindow(QMainWindow):
                 a.setCheckable(True)
                 a.setChecked(getattr(cv, attr))
                 a.toggled.connect(lambda on, at=attr, c=cv: (setattr(c, at, on), c.update()))
+            from . import backdrop
+            bg = self.extra.addAction(icon("stage"), tr("Stage background: where the ground is (none, simple, MUGEN stage or image)"))
+            if getattr(self, "_backdrop_menu", None) is None:      # um só, não um por troca de aba
+                self._backdrop_menu = backdrop.menu(self, self)
+            bg.setMenu(self._backdrop_menu)
+            btn = self.extra.widgetForAction(bg)
+            if isinstance(btn, QToolButton):
+                btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             if page is self.sprites:
                 self.extra.addSeparator()
                 a = self.extra.addAction(icon("thumbs"), tr("Organizer (thumbnails) (Ctrl+Alt+O)"))
@@ -853,39 +866,54 @@ class MainWindow(QMainWindow):
         if fn:
             fn()
 
+    def apply_backdrop(self) -> None:
+        """Fundo de stage nos editores de sprites e de animações (menu Fundo da barra do canvas)."""
+        from . import backdrop
+        bg, warn = backdrop.build(self.ctx)
+        self.anims.canvas.set_backdrop(bg)
+        self.sprites.set_backdrop(bg)
+        if warn:
+            self.ctx.status.emit(warn)
+
     def find_text(self, replace: bool = False) -> None:
-        """Ctrl+F procura só na aba aberta (animação, sprite, som, statedef, comando…); nas abas
-        de código, o texto do arquivo vem como último item. Ctrl+H e a aba Definições: o texto."""
+        """Ctrl+F nas abas de código abre a barra de busca no texto do arquivo (Ctrl+H com
+        substituir); nas outras abas procura o que a aba mostra (animação, sprite, som…)."""
+        page = self.current_page()
+        if page in self.code_pages or replace:
+            self._find_in_text(None, replace)
+            return
+        self.goto_anything()
+
+    def goto_anything(self) -> None:
+        """Ctrl+Shift+G: lista do que a aba mostra (statedefs, comandos, animações, sprites, sons) para
+        saltar pelo número ou nome; nas abas de código, o texto digitado também pode ir para a
+        barra de busca."""
         from . import quickfind
         page = self.current_page()
-        found = None if replace or page is None else quickfind.entries(self, page)
-        if found is not None:
-            hint, items = found
-            ed = self.current_code_edit()
-            sel = ed.textCursor().selectedText() if ed else ""
-
-            def tail(q):
-                if not q.strip() or ed is None:
-                    return []
-                return [(tr("Find “{0}” in the text of this file").format(q.strip()), tr("text"),
-                         lambda: self._find_in_text(q.strip()))]
-            dialogs.CommandPalette(items, self, placeholder=hint, score=quickfind.score, tail=tail,
-                                   text=sel if sel and " " not in sel else "").exec()
+        found = quickfind.entries(self, page) if page is not None else None
+        if found is None:
+            if page in self.code_pages:
+                self._find_in_text(None)
             return
-        self._find_in_text(None, replace)
+        hint, items = found
+        ed = self.current_code_edit()
+        sel = ed.textCursor().selectedText() if ed else ""
+
+        def tail(q):
+            if not q.strip() or ed is None:
+                return []
+            return [(tr("Find “{0}” in the text of this file").format(q.strip()), tr("text"),
+                     lambda: self._find_in_text(q.strip()))]
+        dialogs.CommandPalette(items, self, placeholder=hint, score=quickfind.score, tail=tail,
+                               text=sel if sel and " " not in sel else "").exec()
 
     def _find_in_text(self, text: str | None, replace: bool = False) -> None:
-        from .findreplace import FindReplaceDialog
         if not self.current_code_edit():
             self.show_page(self.states if self.ctx.char else None)
         ed = self.current_code_edit()
         if not ed:
             return
-        dlg = FindReplaceDialog.instance(self)
-        dlg.open_for(text if text is not None else ed.textCursor().selectedText(), replace=replace, all_files=False)
-        if text:
-            dlg.find_edit.setText(text)
-            dlg.find(False)
+        self.current_page().open_find(text if text is not None else ed.textCursor().selectedText(), replace)
 
     def goto_line(self) -> None:
         ed = self.current_code_edit()
@@ -1173,6 +1201,7 @@ class MainWindow(QMainWindow):
         self.fill_explorer()
         self.welcome.refresh()
         self._shown_errors = set()      # outro personagem: os erros dele contam como novos
+        self.apply_backdrop()           # o stage simples segue o localcoord do personagem
         self.validate()
         self.show_page(self.current_page() or self.defs)
         self.update_title()
@@ -1538,8 +1567,12 @@ class MainWindow(QMainWindow):
         if engine == "mugen" and c.is_zss:
             QMessageBox.information(self, title, tr("ZSS states only run in Ikemen GO"))
             return
-        if self.is_dirty() and QMessageBox.question(self, title, tr("Save before running?")) == QMessageBox.StandardButton.Yes:
-            self.save()
+        # o que está editado e não foi salvo vai junto: o motor roda uma cópia de teste com as
+        # mudanças, sem gravar nada nos arquivos do projeto
+        unsaved = self.is_dirty()
+        if unsaved:
+            for p in self.code_pages:
+                p.apply_all()
         from ..tools import charkit
         try:
             exe, engine = runner.engine_exe(root or "")
@@ -1550,11 +1583,20 @@ class MainWindow(QMainWindow):
         title = runner.ENGINE_NAMES[engine]
         try:
             arg = runner.char_argument(c, root, engine)
+            if unsaved:
+                test = charkit.test_copy(c)
+                arg = (test / c.def_path.name).relative_to((root / "chars").resolve()).as_posix() \
+                    if not Path(arg).is_absolute() else (test / c.def_path.name).as_posix()
+                self.engine_out.appendPlainText(tr("[{0:%H:%M:%S}] running what is edited, without saving (test copy "
+                                                   "in {1}; your files are not touched)").format(
+                    datetime.datetime.now(), test))
         except ValueError:
             # fora de chars/: o motor não carrega; instala uma cópia em chars/<pasta>
             if QMessageBox.question(self, title, tr("The character is outside {0}.\nInstall a copy there and run it?").format(root / 'chars')) != QMessageBox.StandardButton.Yes:
                 return
             r = charkit.install(c.dir, root)
+            if unsaved:
+                c.save_to(r["installed"], set(c.dirty))
             arg = f"{Path(r['installed']).name}/{c.def_path.name}"
         args = runner.profile_args(exe, engine, arg, prof, prof.stage or charkit.default_stage(root))
         problem = runner.config_problem(root, engine)
