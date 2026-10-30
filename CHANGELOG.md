@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-10-30
+
+### Changed
+
+- Animations: "Current frame" section at the top, with a slider to pick the frame without changing its time.
+
 ## [0.4.5] - 2026-10-30
 
 ### Added
@@ -268,7 +274,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/eduardovbe/CharFactory/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/eduardovbe/CharFactory/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/eduardovbe/CharFactory/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/eduardovbe/CharFactory/compare/v0.2.5...v0.3.0
