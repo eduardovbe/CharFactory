@@ -1875,6 +1875,28 @@ def test_stage_backdrop_puts_the_stage_ground_on_the_axis(gui, mugen_dir):
     assert bg["kind"] == "simple" and warn
 
 
+def test_current_frame_section_selects_without_touching_timing(gui):
+    """Issue #7: a seção "Frame atual" (aberta, no topo) tem o slider que escolhe o frame sem
+    mudar tempo nem ordem, Grupo e Índice na mesma linha, tempo, offset, flip e o loop; nada
+    passa da largura do painel."""
+    app, ctx, win, _ = gui
+    win.show_page(win.anims)
+    app.processEvents()
+    an = win.anims
+    a = an.action()
+    times = [f.time for f in a.frames]
+    sec = an.frame_sec
+    assert sec.is_open() and an.frame_nav.isVisibleTo(sec) and an.loop.isVisibleTo(sec)
+    assert an.gi.g.y() == an.gi.i.y()                         # mesma linha
+    for k in range(len(a.frames)):
+        an.frame_nav.set_index(k)
+        app.processEvents()
+        assert an.timeline.current_frame == k and f"{k + 1}/{len(a.frames)}" in sec.head.text()
+    assert [f.time for f in a.frames] == times
+    sc = an.left.scroll
+    assert sc.widget().minimumSizeHint().width() <= sc.viewport().width()
+
+
 def test_right_panel_toggle_reopens_a_collapsed_panel(gui):
     """Ctrl+Alt+N esconde e mostra o painel da direita; recolhido arrastando a divisa (largura
     0, mas "visível"), ele volta numa largura útil em vez de continuar sumido."""

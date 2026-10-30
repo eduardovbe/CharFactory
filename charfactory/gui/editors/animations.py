@@ -7,7 +7,7 @@ import re
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QSplitter, QVBoxLayout,
+                               QListWidgetItem, QMessageBox, QSizePolicy, QSplitter, QVBoxLayout,
                                QWidget)
 
 from ...formats import air
@@ -56,7 +56,7 @@ class AnimationEditor(QWidget):
         self.name.editingFinished.connect(self.on_name)
         self.frame_nav = Navigator()
         self.frame_nav.indexChanged.connect(lambda _: self.show_frame())
-        self.gi = GroupIndex()
+        self.gi = GroupIndex(inline=True)
         self.gi.changed.connect(lambda g, i: self.set_field(group=g, item=i))
         self.offset = AxisEditor(tr("Offset X"), tr("Offset Y"))
         self.offset.changed.connect(lambda x, y: self.set_field(x=x, y=y))
@@ -137,19 +137,29 @@ class AnimationEditor(QWidget):
             return tool_button("apply_next", tip, lambda: self.apply_next(what), size=16)
 
         act_sec = Section(tr("Animation"), "anims.action")
+        self.act_sec = act_sec
         act_sec.add(form_row(tr("Number"), self.number), form_row(tr("Name"), self.name), form_row(tr("Speed"), self.speed))
 
-        frame_sec = Section(tr("Frame"), "anims.frame")
+        # frame atual: o slider escolhe o frame sem mexer no tempo nem na ordem (issue #7: só a
+        # timeline sobrava, e lá um clique podia arrastar a borda); aberta por padrão, no topo
+        frame_sec = Section(tr("Current frame"), "anims.current_frame")
         self.frame_sec = frame_sec
+        # o título muda a cada frame: ele encolhe em vez de alargar o painel (com os 3 botões ao
+        # lado, "Frame atual 1 / 11 · 10t" passava da largura e cortava a borda direita)
+        frame_sec.head.setSizePolicy(QSizePolicy.Policy.Ignored, frame_sec.head.sizePolicy().verticalPolicy())
+        frame_sec.head.setMinimumWidth(60)
         for b in (tool_button("add_frame", tr("Add frame (Ctrl+Shift+A)"), self.add_frame, size=16),
                   tool_button("duplicate", tr("Duplicate frame"), self.dup_frame, size=16),
                   tool_button("delete", tr("Delete frame (Ctrl+Shift+Del)"), self.del_frame, size=16)):
             frame_sec.add_header_widget(b)
+        self.frame_nav.setToolTip(tr("Choose the frame (arrows: previous/next). It does not change its time or position."))
         self.offset.trailing.addWidget(apply_btn(tr("Apply offset to the next frames (Alt+Shift+O)"), "offset"),
                                        0, Qt.AlignmentFlag.AlignVCenter)
-        frame_sec.add(self.gi, self.offset,
+        frame_sec.add(self.frame_nav, self.gi,
                       form_row(tr("Time"), self.time, apply_btn(tr("Apply time to the next frames (Alt+Shift+T)"), "time")),
-                      form_row(tr("Flip"), self.flip, apply_btn(tr("Apply flip to the next frames (Alt+Shift+F)"), "flip")))
+                      self.offset,
+                      form_row(tr("Flip"), self.flip, apply_btn(tr("Apply flip to the next frames (Alt+Shift+F)"), "flip")),
+                      self.loop)
 
         blend_sec = Section(tr("Transparency and scale"), "anims.blend", collapsed=True)
         ip = QGridLayout()
@@ -191,7 +201,7 @@ class AnimationEditor(QWidget):
         lv = QVBoxLayout(content)
         lv.addWidget(self.tools)
         lv.addWidget(self.nav)
-        for sec in (act_sec, frame_sec, box_sec, blend_sec, onion_sec):
+        for sec in (frame_sec, act_sec, box_sec, blend_sec, onion_sec):
             lv.addWidget(sec)
         lv.addWidget(hint_label(tr("Ctrl+drag the sprite changes the offset; arrows move 1 px (Shift: 10).")))
         lv.addStretch()
@@ -332,10 +342,16 @@ class AnimationEditor(QWidget):
             self.frame_nav.set_count(len(a.frames))
             self.frame_nav.set_index(min(frame_index, max(0, len(a.frames) - 1)))
             tt = a.total_time
-            self.frame_nav.set_suffix(f" - {tt} ticks" if tt >= 0 else tr(" - infinite"))
+            self._show_total(tt)
             self.timeline.set_frames([f.time for f in a.frames], a.loopstart, f"{a.number}\n{self.name.text()}")
         self._quiet = False
         self.show_frame()
+
+    def _show_total(self, total: int) -> None:
+        """Duração da animação no título de 'Animação' (no contador do slider ela cortava o
+        "3 / 5" no painel estreito)."""
+        self.act_sec.head.setText(tr("Animation · {0}").format(
+            tr("{0} ticks").format(total) if total >= 0 else tr("infinite")))
 
     def show_frame(self) -> None:
         a, f = self.action(), self.frame()
@@ -355,7 +371,8 @@ class AnimationEditor(QWidget):
             self.src.setValue(int(m[1]))
             self.dst.setValue(int(m[2]))
         self.loop.setChecked(self.frame_nav.index() == a.loopstart)
-        self.frame_sec.head.setText(tr("Frame {0} / {1}").format(self.frame_nav.index() + 1, len(a.frames)))
+        self.frame_sec.head.setText(tr("Current frame {0}/{1} · {2}").format(
+            self.frame_nav.index() + 1, len(a.frames), "∞" if f.time < 0 else f"{f.time}t"))
         self.alpha_rows.setVisible(self.trans.currentIndex() == 4)
         ex = (f.extra + ["", "", ""])[:3]
         self.xs.setValue(float(ex[0] or 1))
@@ -406,7 +423,7 @@ class AnimationEditor(QWidget):
         self.ctx.record("anims")                 # marca para gravar e entra no desfazer
         a = self.action()
         if a:
-            self.frame_nav.set_suffix(f" - {a.total_time} ticks" if a.total_time >= 0 else tr(" - infinite"))
+            self._show_total(a.total_time)
             self.timeline.set_frames([f.time for f in a.frames], a.loopstart, self.timeline.title)
         self.ctx.modelChanged.emit("anims_inline")
 

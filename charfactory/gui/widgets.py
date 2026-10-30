@@ -787,7 +787,8 @@ class GroupIndex(QWidget):
     prevGroup = Signal()
     nextGroup = Signal()
 
-    def __init__(self, a: str = tr("Group"), b: str = tr("Index"), group_buttons: bool = True):
+    def __init__(self, a: str = tr("Group"), b: str = tr("Index"), group_buttons: bool = True,
+                 inline: bool = False):
         super().__init__()
         self.setObjectName("plain")
         self.g, self.i = spin(-1, 99999), spin(-1, 99999)
@@ -797,12 +798,25 @@ class GroupIndex(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(GAP - 2)
-        grid.addWidget(field_label(a.rstrip(":")), 0, 0)
-        grid.addWidget(self.g, 0, 1)
-        grid.addWidget(field_label(b.rstrip(":")), 1, 0)
-        grid.addWidget(self.i, 1, 1)
-        grid.setColumnStretch(1, 1)
-        if group_buttons:
+        if inline:
+            # os dois na mesma linha (painel do frame atual: menos rolagem)
+            # o 1º rótulo alinha com a coluna dos outros campos; o 2º só ocupa o próprio texto
+            # (com a largura da coluna a linha passava do painel e cortava a borda direita)
+            grid.addWidget(field_label(a.rstrip(":")), 0, 0)
+            grid.addWidget(self.g, 0, 1)
+            grid.addWidget(field_label(b.rstrip(":"), 0), 0, 2)
+            grid.addWidget(self.i, 0, 3)
+            for s in (self.g, self.i):
+                s.setMinimumWidth(48)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(3, 1)
+        else:
+            grid.addWidget(field_label(a.rstrip(":")), 0, 0)
+            grid.addWidget(self.g, 0, 1)
+            grid.addWidget(field_label(b.rstrip(":")), 1, 0)
+            grid.addWidget(self.i, 1, 1)
+            grid.setColumnStretch(1, 1)
+        if group_buttons and not inline:
             grid.addWidget(tool_button("left", tr("Previous group"), self.prevGroup.emit, size=14), 0, 2)
             grid.addWidget(tool_button("right", tr("Next group"), self.nextGroup.emit, size=14), 0, 3)
         self._quiet = False
