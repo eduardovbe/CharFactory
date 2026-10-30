@@ -221,6 +221,8 @@ def test_exit_conditions_the_simulator_used_to_miss(tmp_path):
         "[State 9973, contra]\ntype = ReversalDef\ntrigger1 = 1\nreversal.attr = SCA, AA\n"
         "p1stateno = 9973\n\n"
         "[State 9973, fim]\ntype = ChangeState\ntrigger1 = time >= 20\nvalue = 0\nctrl = 1\n"))
+    # o 0 do próprio char: sem o MUGEN (como no CI) não há common1.cns de onde ele viria
+    ops.set_statedef_text(c, 0, "[Statedef 0]\ntype = S\nmovetype = I\nphysics = S\nanim = 0\nctrl = 1\n")
     sim = simulate.simulate(c, 9970, max_ticks=200)
     p1 = [e["value"] for e in sim.events if e["kind"] == "estado" and e["who"] == "P1"]
     assert p1.count(9972) == 40 and p1[-1] == 0                 # 40 px, uma volta por px
