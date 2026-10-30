@@ -12,6 +12,11 @@ from .theme import Theme
 from ..i18n import tr
 
 
+# degraus da roda do mouse e de Ctrl+-/+: abaixo de 1x para sprites gigantes caberem na tela
+# (issue #8); de 1x para cima só inteiros, que mantêm o pixel quadrado
+ZOOMS = (0.1, 0.125, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16)
+
+
 def pil_to_qimage(img: Image.Image) -> QImage:
     rgba = img.convert("RGBA")
     data = rgba.tobytes("raw", "RGBA")
@@ -26,7 +31,7 @@ class SpriteCanvas(QWidget):
     """
     axisPicked = Signal(int, int)      # nova posição do eixo, relativa ao canto do sprite
     boxesChanged = Signal()
-    zoomChanged = Signal(int)
+    zoomChanged = Signal(float)
     imageDragged = Signal(int, int, bool)  # deslocamento desde o início do Ctrl+arrastar; True = soltou
     nudged = Signal(int, int)               # setas do teclado (Shift = 10 px)
     doubleClicked = Signal()                # duplo clique no sprite (o editor de sprites abre a edição)
@@ -131,9 +136,9 @@ class SpriteCanvas(QWidget):
         x1, y1 = x0 + self.image.width(), y0 + self.image.height()
         if not self.center_image:
             x0, y0, x1, y1 = min(x0, 0), min(y0, 0), max(x1, 0), max(y1, 0)
-        z = max_zoom
-        while z > 1 and ((x1 - x0) * z > self.width() * 0.9 or (y1 - y0) * z > self.height() * 0.9):
-            z -= 1
+        fits = [z for z in ZOOMS if z <= max_zoom and (x1 - x0) * z <= self.width() * 0.9
+                and (y1 - y0) * z <= self.height() * 0.9]
+        z = fits[-1] if fits else ZOOMS[0]
         self.pan = QPointF(0, 0)
         self.set_zoom(z)
         if not self.center_image:
@@ -153,10 +158,28 @@ class SpriteCanvas(QWidget):
         o = self.origin()
         return round((p.x() - o.x()) / self.zoom), round((p.y() - o.y()) / self.zoom)
 
-    def set_zoom(self, z: int) -> None:
-        self.zoom = max(1, min(16, z))
+    def set_zoom(self, z: float, anchor: QPointF | None = None) -> None:
+        """Muda o zoom; com anchor (posição na tela), o ponto sob ele fica parado."""
+        z = max(ZOOMS[0], min(ZOOMS[-1], z))
+        if anchor is not None and z != self.zoom:
+            o0 = self.origin()
+            want = anchor - (anchor - o0) * (z / self.zoom)
+            self.zoom = z
+            self.pan += want - self.origin()
+        self.zoom = z
         self.zoomChanged.emit(self.zoom)
         self.update()
+
+    def zoom_step(self, d: int, anchor: QPointF | None = None) -> None:
+        """Degrau seguinte (d = +1) ou anterior (d = -1) da escada de zoom."""
+        if d > 0:
+            z = next((z for z in ZOOMS if z > self.zoom + 1e-9), ZOOMS[-1])
+        else:
+            z = next((z for z in reversed(ZOOMS) if z < self.zoom - 1e-9), ZOOMS[0])
+        self.set_zoom(z, anchor)
+
+    def zoom_label(self) -> str:
+        return f"{self.zoom:g}x" if self.zoom >= 1 else f"{round(self.zoom * 100)}%"
 
     # ------------------------------------------------------------ desenho
 
@@ -199,7 +222,7 @@ class SpriteCanvas(QWidget):
         layer = QImage(lw, lh, QImage.Format.Format_RGBA8888)
         layer.fill(Qt.GlobalColor.transparent)
         lp = QPainter(layer)
-        lp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        lp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.zoom < 1)
         lp.drawImage(QRectF(r.left() * dpr - x0, r.top() * dpr - y0, r.width() * dpr, r.height() * dpr), self.image)
         lp.end()
         w = buf.width()
@@ -247,7 +270,8 @@ class SpriteCanvas(QWidget):
         p.setPen(QPen(ground, 1, Qt.PenStyle.DashLine))
         if not self.backdrop:
             p.drawLine(0, int(o.y()), self.width(), int(o.y()))
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        # reduzido, o vizinho mais próximo pula pixels e o sprite tremula: suaviza abaixo de 1x
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.zoom < 1)
         if self.onion is not None:
             p.setOpacity(getattr(self, "onion_opacity", 0.35))
             tl = self.to_screen(self.onion_pos.x(), self.onion_pos.y())
@@ -349,7 +373,7 @@ class SpriteCanvas(QWidget):
         if self.show_rulers:
             self._draw_rulers(p, o)
         # rótulo do zoom num chip com a cor do painel: legível no tema claro e no escuro
-        label = f"{self.zoom}x" + (tr("   ·   transparency {0}").format(self.blend.upper()) if self.blend and self.image is not None else "")
+        label = self.zoom_label() + (tr("   ·   transparency {0}").format(self.blend.upper()) if self.blend and self.image is not None else "")
         fm = p.fontMetrics()
         chip = QRectF(30, self.height() - 10 - fm.height() - 4, fm.horizontalAdvance(label) + 14, fm.height() + 6)
         ui = self.theme.ui if self.theme else {}
@@ -364,10 +388,10 @@ class SpriteCanvas(QWidget):
     RULER = 22
 
     def _grid_step(self) -> int:
-        for step in (5, 10, 20, 50, 100):
+        for step in (5, 10, 20, 50, 100, 200, 500):
             if step * self.zoom >= 28:
                 return step
-        return 200
+        return 1000
 
     def _draw_grid(self, p: QPainter, o: QPointF) -> None:
         """Grade de pontos (estilo 'dot grid'); a cada 5 passos um ponto mais forte."""
@@ -443,7 +467,9 @@ class SpriteCanvas(QWidget):
     # ------------------------------------------------------------ interação
 
     def wheelEvent(self, e):
-        self.set_zoom(self.zoom + (1 if e.angleDelta().y() > 0 else -1))
+        dy = e.angleDelta().y()
+        if dy:                          # zoom em volta do cursor, como nos editores de imagem
+            self.zoom_step(1 if dy > 0 else -1, e.position())
 
     def _hit(self, pos: QPointF):
         """(índice, alça) da caixa sob o cursor; alça: 'move' ou combinação de l/r/t/b."""

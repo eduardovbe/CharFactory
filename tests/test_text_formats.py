@@ -75,3 +75,14 @@ def test_entries_cache_follows_line_edits():
     import copy
     clone = copy.deepcopy(sec)
     assert "_entries" not in clone.__dict__ and clone.get("x") == "3"
+
+
+def test_cp1252_text_keeps_every_byte(tmp_path):
+    """Texto que não é UTF-8 (Shift-JIS de char japonês) volta byte a byte: os 5 bytes que o
+    cp1252 não define viravam "?" ao salvar."""
+    raw = b"[State 0, \x83V\x83\x87\x81[\x83g \x81\x9d\x8d\x8f\x90]\r\ntype = Null\r\n"
+    p = tmp_path / "jp.cns"
+    p.write_bytes(raw)
+    doc = mtext.load(p)
+    doc.save(tmp_path / "out.cns")
+    assert (tmp_path / "out.cns").read_bytes() == raw

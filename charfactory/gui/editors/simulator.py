@@ -743,6 +743,9 @@ class SimulatorPage(QWidget):
             # sem esperar a medida sprite a sprite das faíscas
             sim = simulate.simulate(c, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
                                     chain=chain, from_ground=simulate.starts_on_ground(c, n))
+            # o mesmo golpe com o P2 no outro modo (defendendo ou não) roda depois, num trabalho à
+            # parte (on_done): o primeiro tick não espera e um erro lá não derruba esta simulação
+            sim.other_args = None if chain or pose == "air" else (c, n, dist, mx, pose, not guard)
             box = simulate._window(sim) if sim.track else None
             simb = None
             if other:                   # A/B: a outra versão com a mesma simulação e a mesma câmera
@@ -793,8 +796,9 @@ class SimulatorPage(QWidget):
         from ...tools import movetimeline, simulate
         tl = movetimeline.build(sim)
         self.timeline.set_data(tl)
+        self._fd_main = tl["frame_data"]
         self.fd_label.setText(self._chain_text(simulate.chain_report(sim)) if sim.chain
-                              else self._fd_text(tl["frame_data"]))
+                              else self._fd_text(self._fd_main))
         self.damage.setText(self._damage_text(simulate.damage_report(sim)))
         self.damage_sec.show()
         ab = self.sim_b is not None
@@ -831,6 +835,23 @@ class SimulatorPage(QWidget):
         job.signals.done.connect(self._audited)
         job.signals.failed.connect(self._audit_failed)
         start(job, self, priority=-1)
+        args = getattr(sim, "other_args", None)
+        if args:                    # acerto e defesa lado a lado (issue #4), sem atrasar o 1º tick
+            def other(args=args):
+                c, n, dist, mx, pose, guard = args
+                o = simulate.simulate(c, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
+                                      from_ground=simulate.starts_on_ground(c, n))
+                return gen, simulate.frame_data(o)
+            job = Job(other)
+            job.signals.done.connect(self._other_mode_done)
+            start(job, self, priority=-2)
+
+    def _other_mode_done(self, result) -> None:
+        gen, fd = result
+        if gen != self._gen:
+            return
+        text = self._fd_text(self._fd_main, fd)
+        self.fd_label.setText((tr("<b>A</b> (current) · ") if self.sim_b is not None else "") + text)
 
     def _audited(self, result) -> None:
         gen, problems = result
@@ -903,8 +924,9 @@ class SimulatorPage(QWidget):
         return " ".join(parts) + " · " + combo
 
     @staticmethod
-    def _fd_text(fd: dict) -> str:
-        """Resumo do frame data com a legenda das cores da barra."""
+    def _fd_text(fd: dict, other: dict | None = None) -> str:
+        """Resumo do frame data com a legenda das cores da barra. `other` é a mesma simulação
+        com o P2 no outro modo (defendendo ou não): o resumo mostra o acerto e a defesa."""
         def chip(key, value, extra=""):
             name, col = PHASES[key]
             return f"<span style='color:{col}'>■</span> {name} <b>{value}</b>{extra}"
@@ -913,15 +935,37 @@ class SimulatorPage(QWidget):
         pause = tr(" + {0} in the pause").format(fd['startup_pause']) if fd.get("startup_pause") else ""
         parts = [chip("preparo", fd["startup"], pause), chip("ativo", fd["active"]),
                  chip("recuperacao", fd["recovery"]), tr("Total <b>{0}</b>").format(fd['total'])]
-        adv = fd["advantage"]
+        seen = set()
+        for f in (fd, other):
+            if not f or f["outcome"] in seen or f["startup"] is None:
+                continue
+            seen.add(f["outcome"])
+            parts += SimulatorPage._advantage_text(f)
+        if not seen & {"acerto", "defesa"}:
+            parts.append(tr("missed P2"))
+        return " · ".join(parts)
+
+    @staticmethod
+    def _advantage_text(fd: dict) -> list[str]:
+        """Vantagem no acerto ou na defesa (o bloqueio à parte quando o guard.ctrltime devolve o
+        controle antes) e a janela de cancelamento."""
         where = {"acerto": tr("on hit"), "defesa": tr("on guard")}.get(fd["outcome"])
         if where is None:
-            parts.append(tr("missed P2"))
-        elif fd["knockdown"]:
-            parts.append(tr("{0}: knocks down").format(where))
+            return []
+        adv, out = fd["advantage"], []
+        if fd["knockdown"]:
+            out.append(tr("{0}: knocks down").format(where))
         elif adv is not None:
-            parts.append(f"{where} <b>{adv:+d}</b>")
-        return " · ".join(parts)
+            stun = fd.get("advantage_stun")
+            out.append(f"{where} <b>{adv:+d}</b>" + (tr(" (blockstun {0:+d})").format(stun) if stun is not None else ""))
+        cx = fd.get("cancel")
+        if cx:
+            into = ", ".join(map(str, cx["into"][:4])) + ("…" if len(cx["into"]) > 4 else "")
+            txt = tr("cancel {0} → {1}: from frame {2}, {3} frames").format(where, into, cx["from"], cx["window"])
+            if cx["advantage"] is not None:
+                txt += tr(", P2 stuck {0}").format(f"<b>{cx['advantage']:+d}</b>")
+            out.append(txt)
+        return out
 
     # ------------------------------------------------------------ linha do tempo → código
 

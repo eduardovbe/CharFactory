@@ -86,9 +86,44 @@ default:
     assert not w
 
 
-def test_loops_warn_and_const_statedef_skipped():
-    _, w = _lower("[StateDef 1]\nwhile time < 3 {\n\tnull{}\n}\n[StateDef const(X)]\nnull{}\n")
-    assert any("loop while" in x for x in w) and any("const(X)" in x for x in w)
+def test_loops_lower_and_const_statedef_skipped():
+    st, w = _lower("[StateDef 1]\nwhile time < 3 {\n\tnull{}\n}\n[StateDef const(X)]\nnull{}\n")
+    assert not any("loop" in x for x in w) and any("const(X)" in x for x in w)
+    assert len(st.statedefs[1].controllers) > 64          # while vira voltas com porta
+    _, w = _lower("[StateDef 1]\nbreak;\n")
+    assert any("break outside a loop" in x for x in w)
+
+
+def test_common_const_without_ikemen_installed():
+    """O common.const do Ikemen vem com o programa: const(StateStand) não é erro e
+    [StateDef const(StateDizzy)] ganha o número dele mesmo sem o Ikemen configurado."""
+    cc = zssread.common_consts()
+    assert cc["statestand"] == "0" and cc["statedizzy"].isdigit()
+    f = zssread.parse("[StateDef const(StateDizzy); type: S;]\n"
+                      "if time > 3 {\n\tchangeState{value: const(StateStand)}\n}\n")
+    assert [s.number for s in f.statedefs] == [int(cc["statedizzy"])]
+    assert not [m for m in zssread.check(f) if m[0] == "error"]
+
+
+def test_loops_run_like_ikemen(tmp_path):
+    """for com limite do jogo, continue e break, while, passo negativo e laço dentro de laço
+    dão no simulador o mesmo que no Ikemen (bytecode.go: início, fim e passo avaliados uma vez)."""
+    import re
+    from charfactory import project
+    from charfactory.tools import generate, simulate
+    defp = generate.new_character(tmp_path / "src", "L")
+    zss = ("[StateDef 9970; type: S; movetype: A; physics: S; anim: 0;]\n"
+           "varSet{var(5): 10}\nlet n = 0;\n"
+           "for i = 0; var(5); 1 {\n\tif $i = 3 { continue; }\n\tif $i = 6 { break; }\n\tlet n = $n + 1;\n}\n"
+           "varSet{var(1): $n}\nlet k = 0;\nwhile $k < 4 {\n\tlet k = $k + 1;\n}\nvarSet{var(2): $k}\n"
+           "let s = 0;\nfor j = 10; 0; -2 {\n\tlet s = $s + $j;\n}\nvarSet{var(3): $s}\n"
+           "let c = 0;\nfor a = 1; 3 {\n\tfor b = 1; var(5) {\n\t\tif $b > 2 { break; }\n"
+           "\t\tlet c = $c + 1;\n\t}\n}\nvarSet{var(4): $c}\n")
+    (defp.parent / "loops.zss").write_text(zss, "utf-8")
+    d = defp.read_text("latin-1")
+    defp.write_text(re.sub(r"(?im)^(\s*st\s*=.*)$", r"\1\nst1 = loops.zss", d, count=1), "latin-1")
+    sim = simulate.simulate(project.load(defp), 9970, max_ticks=3)
+    assert {k: sim.p1.vars.get(k) for k in (1, 2, 3, 4)} == {1: 5, 2: 4, 3: 30, 4: 6}
 
 
 def test_simexpr_assignment():
@@ -208,7 +243,7 @@ def test_cns_validate_catches_const_and_attr():
     assert any("velocity.runback.x" in m for m in msgs) and any("XX" in m for m in msgs)
 
 
-def test_for_loop_is_unrolled_and_while_warns():
+def test_for_loop_is_unrolled_and_while_is_gated():
     st, w = _lower("[StateDef 300]\nfor i = 1; 3 {\n\tvarAdd{v: 1; value: $i}\n}\n"
                    "for j = 0; 10; 5 {\n\tif time = $j {\n\t\tnull{}\n\t}\n}\n"
                    "while time < 3 {\n\tnull{}\n}\n"
@@ -216,6 +251,18 @@ def test_for_loop_is_unrolled_and_while_warns():
     ctrls = st.statedefs[300].controllers
     adds = [c.section.get("value") for c in ctrls if c.type == "varAdd"]
     assert adds == ["1", "2", "3"]
-    assert [c.triggers()["triggerall"] for c in ctrls if c.type == "null"] == \
-           [["time = 0"], ["time = 5"], ["time = 10"]]
-    assert any("while" in x for x in w) and any("break" in x for x in w)
+    nulls = [c.triggers()["triggerall"] for c in ctrls if c.type == "null"]
+    assert nulls[:3] == [["time = 0"], ["time = 5"], ["time = 10"]]
+    # while e o for com break viram voltas com porta (os locais go/cont nos gatilhos)
+    assert len(nulls) > 64 and all(len(t) >= 2 for t in nulls[3:]) and not w
+
+
+def test_zss_save_keeps_line_endings_and_bytes(tmp_path):
+    """Gravar um .zss sem mexer devolve o mesmo arquivo: LF continua LF (write_text no Windows
+    trocava por CRLF) e CRLF continua CRLF."""
+    for nl in ("\n", "\r\n"):
+        raw = ("# teste" + nl + "[StateDef 0;]" + nl + "null{}" + nl).encode()
+        p = tmp_path / "a.zss"
+        p.write_bytes(raw)
+        zssread.load(p).save(tmp_path / "b.zss")
+        assert (tmp_path / "b.zss").read_bytes() == raw

@@ -1259,6 +1259,9 @@
    }
   },
   "mapadd": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -1272,6 +1275,9 @@
    }
   },
   "mapset": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -2485,6 +2491,9 @@
    }
   },
   "parentmapadd": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -2493,6 +2502,9 @@
    }
   },
   "parentmapset": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -3307,6 +3319,9 @@
    }
   },
   "rootmapadd": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -3315,6 +3330,9 @@
    }
   },
   "rootmapset": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -3634,6 +3652,9 @@
    }
   },
   "teammapadd": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },
@@ -3642,6 +3663,9 @@
    }
   },
   "teammapset": {
+   "index": {
+    "doc": "Which one of the matching items to affect, counting from 0 (for example, the second target is index = 1). Defaults to affecting all of them."
+   },
    "redirectid": {
     "doc": "Runs the controller on the player or helper with this ID instead of the one running the state (like the redirection in triggers). Defaults to the player itself."
    },

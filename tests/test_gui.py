@@ -33,7 +33,55 @@ def gui(mugen_dir, tmp_path, monkeypatch):
     for page in win.code_pages:
         for f in page.files:
             f["edit"].document().setModified(False)
-    win.close()
+    from conftest import dispose_window
+    dispose_window(win)
+
+
+def test_zss_state_file_shows_and_saves_as_zss(gui):
+    """A aba de um .zss mostra o próprio ZSS (antes mostrava o CNS rebaixado), com o realce do
+    ZSS (`;` não é comentário); aplicar e gravar mantém o ZSS e a árvore acha os estados."""
+    import re as _re
+    from charfactory.formats import zssread
+    from charfactory.gui.editors.code import ZssHighlighter
+    app, ctx, win, work = gui
+    zss = ("# Soco de teste\n[StateDef 9970; type: S; movetype: A; physics: S; anim: 200;]\n\n"
+           "if time = 2 {\n\tvelSet{x: 2; y: 0}\n}\n"
+           "if animTime = 0 {\n\tchangeState{value: 0; ctrl: 1}\n}\n"
+           "let k = 0;\nwhile $k < var(1) {\n\tlet k = $k + 1;\n\tnull{}\n}\n"
+           "\n[StateDef -1;]\n\nif command = \"x\" && ctrl {\n\tchangeState{value: 2970}\n}\n")
+    (work / "extra.zss").write_text(zss, "utf-8")
+    d = (work / "kfm.def").read_text("latin-1")
+    (work / "kfm.def").write_text(_re.sub(r"(?im)^(\s*st\s*=.*)$", r"\1\nst1 = extra.zss", d, count=1), "latin-1")
+    ctx.reopen()
+    app.processEvents()
+    win.show_page(win.states)
+    app.processEvents()
+    f = next(f for f in win.states.files if f["path"].name == "extra.zss")
+    ed = f["edit"]
+    assert ed.toPlainText() == zss and isinstance(ed.highlighter, ZssHighlighter)
+    win.states.tabs.setCurrentIndex(win.states.files.index(f))
+    win.states.fill_tree()
+    found = []
+    def walk(it):
+        found.append(it.text(0))
+        for k in range(it.childCount()):
+            walk(it.child(k))
+    for k in range(win.states.tree.topLevelItemCount()):
+        walk(win.states.tree.topLevelItem(k))
+    assert any(t.startswith("9970") for t in found) and not any("@" in t for t in found)
+    # o while desenrolado (64 voltas) aparece uma vez só, sem os locais internos
+    assert sum(t.lower().startswith("null") for t in found) == 1
+    assert not any(t.lower().startswith(("varset", "zssloopcut")) for t in found)
+    from charfactory.tools import simulate
+    assert 2970 in simulate.move_states(ctx.char)     # o [StateDef -1] do ZSS conta como golpe
+    # editar, aplicar e gravar: continua ZSS no disco
+    ed.setPlainText(zss.replace("x: 2", "x: 3"))
+    win.states.apply(f)
+    st = next(s for s in ctx.char.states if s.path.name == "extra.zss")
+    assert isinstance(st, zssread.ZssStates)
+    st.save()
+    assert "velSet{x: 3; y: 0}" in (work / "extra.zss").read_text("utf-8")
+    assert ed.comment_prefix == "#"
 
 
 def test_open_loads_only_the_visible_code_page(gui):
@@ -1827,6 +1875,58 @@ def test_stage_backdrop_puts_the_stage_ground_on_the_axis(gui, mugen_dir):
     assert bg["kind"] == "simple" and warn
 
 
+def test_right_panel_toggle_reopens_a_collapsed_panel(gui):
+    """Ctrl+Alt+N esconde e mostra o painel da direita; recolhido arrastando a divisa (largura
+    0, mas "visível"), ele volta numa largura útil em vez de continuar sumido."""
+    app, ctx, win, _ = gui
+    win.show_page(win.anims)
+    app.processEvents()
+    side = win.anims.right
+    split = side.parentWidget()
+    k = split.indexOf(side)
+    win.toggle_right()
+    assert not side.isVisible()
+    win.toggle_right()
+    assert side.isVisible()
+    sizes = split.sizes()
+    sizes[0], sizes[k] = sizes[0] + sizes[k], 0
+    split.setSizes(sizes)
+    app.processEvents()
+    assert split.sizes()[k] == 0 and side.isVisible()
+    win.toggle_right()
+    app.processEvents()
+    assert split.sizes()[k] > 100
+
+
+def test_canvas_zooms_out_for_giant_sprites_around_the_cursor(gui):
+    """Sprite gigante cabe na tela (zoom abaixo de 1x) e a roda mantém parado o ponto sob o
+    cursor (#8)."""
+    from PIL import Image
+    from PySide6.QtCore import QPointF
+    from charfactory.gui.canvas import ZOOMS, SpriteCanvas
+    cv = SpriteCanvas()
+    cv.resize(800, 500)
+    cv.set_image(Image.new("RGBA", (1600, 1400), (255, 0, 0, 255)), 800, 1400)   # eixo no pé
+    cv.fit(8)
+    assert cv.zoom < 1 and 1600 * cv.zoom <= 800 and 1400 * cv.zoom <= 500
+    at = QPointF(600, 150)
+    o = cv.origin()
+    before = ((at.x() - o.x()) / cv.zoom, (at.y() - o.y()) / cv.zoom)
+    cv.zoom_step(-1, at)
+    o = cv.origin()
+    after = ((at.x() - o.x()) / cv.zoom, (at.y() - o.y()) / cv.zoom)
+    assert abs(before[0] - after[0]) < 1e-6 and abs(before[1] - after[1]) < 1e-6
+    for _ in range(40):
+        cv.zoom_step(-1)
+    assert cv.zoom == ZOOMS[0] and cv.zoom_label() == "10%"
+    for _ in range(40):
+        cv.zoom_step(1)
+    assert cv.zoom == ZOOMS[-1] and cv.zoom_label() == "16x"
+    cv.grab()                                   # desenha nos dois extremos sem erro
+    cv.set_zoom(ZOOMS[0])
+    cv.grab()
+
+
 def test_timeline_drags_frame_edges_like_a_video_editor(gui):
     """Arrastar a borda de um frame muda o tempo dele; Shift+arrastar estica/comprime tudo; Esc cancela."""
     from PySide6.QtCore import QEvent, QPointF, Qt
@@ -1878,6 +1978,24 @@ def test_timeline_drags_frame_edges_like_a_video_editor(gui):
     QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=(edge + QPointF(5 * scale, 0)).toPoint())
     assert [f.time for f in a.frames] == times
     assert Timeline.stretch([3, 3, 3, -1], 0.5) == [2, 1, 2, -1]
+    # clicar na borda sem arrastar (ou com um tremor) escolhe o frame e não muda o tempo (#7)
+    an.show_action(2)
+    QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=edge.toPoint())
+    QTest.mouseMove(tl, (edge + QPointF(2, 0)).toPoint())
+    QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=(edge + QPointF(2, 0)).toPoint())
+    assert [f.time for f in a.frames] == times and an.frame_nav.index() in (0, 1)
+    QTest.keyClick(tl, Qt.Key.Key_Right)                 # setas andam de frame em frame
+    assert an.frame_nav.index() in (1, 2)
+    # travada, a borda não pega: arrastar só escolhe
+    an.set_timeline_locked(True)
+    try:
+        assert tl._edge_at(edge.x()) == -1
+        QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=edge.toPoint())
+        QTest.mouseMove(tl, (edge + QPointF(5 * scale, 0)).toPoint())
+        QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=(edge + QPointF(5 * scale, 0)).toPoint())
+        assert [f.time for f in a.frames] == times
+    finally:
+        an.set_timeline_locked(False)
     # arrastar o meio do 1º frame para depois do 3º muda a ordem; o início do loop segue o frame dele
     an.show_action()
     first, third = a.frames[0], a.frames[2]

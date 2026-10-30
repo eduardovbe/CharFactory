@@ -118,10 +118,15 @@ def sprite_rgba(char: Character, g: int, i: int, palette: int | None = None):
     hit = _RGBA.get(key, lambda v: v[0] is src and v[1] == pkey)
     if hit is not None:
         return hit[2], spr.axis_x, spr.axis_y
-    if spr.is_truecolor:
-        im = s.image(spr)
-    else:
-        idx = np.frombuffer(s.pixels(spr), np.uint8).reshape(spr.height, spr.width)
+    try:
+        if spr.is_truecolor:
+            im = s.image(spr)
+        else:
+            px = s.pixels(spr)
+    except sffmod.SFFError:          # sprite estragado: não desenha, como se faltasse (o resto segue)
+        return None, 0, 0
+    if not spr.is_truecolor:
+        idx = np.frombuffer(px, np.uint8).reshape(spr.height, spr.width)
         cols = np.zeros((256, 4), np.uint8)
         c = np.array(pal.colors[:256], np.uint8).reshape(-1, 3)
         cols[:len(c), :3] = c

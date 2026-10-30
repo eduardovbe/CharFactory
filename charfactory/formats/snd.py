@@ -27,7 +27,7 @@ class Sound:
                 return {"channels": w.getnchannels(), "rate": w.getframerate(),
                         "bits": w.getsampwidth() * 8,
                         "seconds": round(w.getnframes() / w.getframerate(), 3)}
-        except (wave.Error, EOFError, ZeroDivisionError):
+        except (wave.Error, EOFError, ZeroDivisionError, RuntimeError, struct.error):
             return {"format": tr("not PCM or invalid"), "bytes": len(self.wav)}
 
 

@@ -170,11 +170,21 @@ def main(root: str) -> None:
     cs = re.search(r'case "const":(.*?)\n\t\tdefault:', text, re.S)
     consts = sorted(set(re.findall(r'"([\w.]+)"', "\n".join(
         re.findall(r'case ([^:\n]+):', cs.group(1)))))) if cs else []
+    # data/common.const: as constantes que todo personagem herda (StateStand, FxDizzyEffect…),
+    # para validar e numerar [StateDef const(...)] mesmo sem o Ikemen instalado
+    common = {}
+    cc = Path(root) / "data" / "common.const"
+    if cc.exists():
+        for line in cc.read_text("utf-8", errors="replace").splitlines():
+            m = re.match(r"^\s*([\w.]+)\s*=\s*([^;]*)", line)
+            if m:
+                common[m.group(1).lower()] = m.group(2).strip()
     dest = Path(__file__).resolve().parents[1] / "charfactory" / "data" / "ikemen_params.json"
     dest.write_text(json.dumps({"source": "Ikemen-GO " + commit, "sctrls": result,
-                                "triggers": triggers, "consts": consts}, indent=1,
-                               ensure_ascii=False), "utf-8")
-    print(f"{len(result)} controladores, {len(triggers)} gatilhos, {len(consts)} constantes -> {dest}")
+                                "triggers": triggers, "consts": consts, "common_consts": common},
+                               indent=1, ensure_ascii=False), "utf-8")
+    print(f"{len(result)} controladores, {len(triggers)} gatilhos, {len(consts)} constantes, "
+          f"{len(common)} do common.const -> {dest}")
 
 
 if __name__ == "__main__":

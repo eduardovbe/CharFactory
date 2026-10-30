@@ -6,9 +6,25 @@ quando nada foi alterado, e edições mexem só nas linhas tocadas.
 """
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _keep8(e):
+    """Erros do cp1252 sem perda: os 5 bytes que ele não define (0x81, 0x8D, 0x8F, 0x90, 0x9D,
+    comuns em texto japonês Shift-JIS) viram U+0081... ao ler e voltam ao mesmo byte ao gravar.
+    Com errors="replace" eles viravam "?" ao salvar e o arquivo perdia bytes."""
+    if isinstance(e, UnicodeDecodeError):
+        return "".join(chr(b) for b in e.object[e.start:e.end]), e.end
+    if isinstance(e, UnicodeEncodeError):
+        chunk = e.object[e.start:e.end]
+        return bytes(ord(ch) if 0x80 <= ord(ch) <= 0x9F else 0x3F for ch in chunk), e.end
+    raise e
+
+
+codecs.register_error("mugen8", _keep8)
 
 _SECTION = re.compile(r"^\s*\[([^\]]*)\]")
 _ENTRY = re.compile(r"^\s*([^=;\[\]]+?)\s*=\s*(.*)$")
@@ -33,7 +49,7 @@ def read_text(path: str | Path) -> tuple[str, str]:
     try:
         return raw.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
-        return raw.decode("cp1252", errors="replace"), "cp1252"
+        return raw.decode("cp1252", errors="mugen8"), "cp1252"
 
 
 @dataclass
@@ -185,7 +201,7 @@ class Document:
 
     def save(self, path: str | Path) -> None:
         enc = "utf-8-sig" if self.encoding == "utf-8-sig" else self.encoding
-        Path(path).write_bytes(self.to_text().encode(enc, errors="replace"))
+        Path(path).write_bytes(self.to_text().encode(enc, errors="mugen8" if enc == "cp1252" else "replace"))
 
 
 def _norm(name: str) -> str:

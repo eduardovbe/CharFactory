@@ -102,6 +102,9 @@ class Sprite:
     linked_to: int | None = None
     _data: bytes = field(default=b"", repr=False)       # dados codificados como no arquivo
     _image: Image.Image | None = field(default=None, repr=False)  # imagem nova (ainda não codificada)
+    samepal: bool | None = None     # SFF v1: "usa a paleta do anterior", como veio do arquivo
+    v1_pal: tuple | None = field(default=None, repr=False)   # SFF v1: as cores ao abrir
+    damaged: bool = False           # dados que não decodificam: sai transparente (como no MUGEN)
 
     @property
     def format_name(self) -> str:
@@ -183,7 +186,15 @@ class SFF:
 
     def _decode(self, spr: Sprite, body: bytes, size: int) -> bytes:
         if spr.fmt == FMT_PCX or spr.fmt == FMT_PNG8:
-            img = Image.open(io.BytesIO(body if spr.fmt == FMT_PCX else body[4:]))
+            try:
+                img = Image.open(io.BytesIO(body if spr.fmt == FMT_PCX else body[4:]))
+                img.load()
+            except OSError:
+                if spr.fmt != FMT_PCX:          # PNG8 estragado: transparente, marcado
+                    spr.damaged = True
+                    return bytes(size)
+                # PCX cortado ("buffer overrun"): o MUGEN desenha assim mesmo, com o que falta zerado
+                return _pcx_lenient(body, spr.width, spr.height)
             if img.mode not in ("P", "L"):  # Pillow abre PCX de paleta cinza como 'L'
                 raise SFFError(tr("sprite {0},{1} is not indexed").format(spr.group, spr.item))
             return img.tobytes()
@@ -202,7 +213,11 @@ class SFF:
             body = spr._data
             hit = PIXELS.get(("rgba", id(body)), lambda v: v[0] is body)
             if hit is None:
-                img = Image.open(io.BytesIO(body[4:])).convert("RGBA")
+                try:
+                    img = Image.open(io.BytesIO(body[4:])).convert("RGBA")
+                except OSError:                 # PNG estragado: transparente, sem derrubar quem desenha
+                    spr.damaged = True
+                    img = Image.new("RGBA", (max(1, spr.width), max(1, spr.height)), (0, 0, 0, 0))
                 hit = (body, img)
                 PIXELS.put(("rgba", id(body)), hit, img.width * img.height * 4 + 64)
             return hit[1].copy()        # quem recebe pode pintar por cima
@@ -309,10 +324,13 @@ def loads(data: bytes) -> SFF:
     if data[:12] != SIGNATURE:
         raise SFFError(tr("invalid signature (not ElecbyteSpr)"))
     ver = (data[15], data[14], data[13], data[12])
-    if ver[0] == 1:
-        return _load_v1(data, ver)
-    if ver[0] == 2:
-        return _load_v2(data, ver)
+    try:
+        if ver[0] == 1:
+            return _load_v1(data, ver)
+        if ver[0] == 2:
+            return _load_v2(data, ver)
+    except (struct.error, IndexError) as e:   # arquivo cortado ou com o índice estragado
+        raise SFFError(tr("the SFF file is truncated or damaged ({0})").format(e)) from e
     raise SFFError(tr("SFF version {0} not supported").format('.'.join(map(str, ver))))
 
 
@@ -321,6 +339,30 @@ def _pcx_size(body: bytes) -> tuple[int, int]:
         return 0, 0
     xmin, ymin, xmax, ymax = struct.unpack_from("<HHHH", body, 4)
     return xmax - xmin + 1, ymax - ymin + 1
+
+
+def _pcx_lenient(body: bytes, w: int, h: int) -> bytes:
+    """PCX de 8 bits e 1 plano decodificado sem exigir os dados inteiros: RLE (byte >= 0xC0 =
+    repetição) linha a linha com bytes_per_line do cabeçalho; o que faltar fica 0 (transparente).
+    A paleta do fim (0x0C + 768) não entra nos dados quando o arquivo está inteiro."""
+    if len(body) < 128:
+        return bytes(w * h)
+    bpl = struct.unpack_from("<H", body, 66)[0] or w
+    end = len(body) - 769 if len(body) >= 769 + 128 and body[-769] == 0x0C else len(body)
+    data, i = bytearray(), 128
+    need = bpl * h
+    while len(data) < need and i < end:
+        b = body[i]
+        i += 1
+        if b >= 0xC0:
+            if i >= end:
+                break
+            data += bytes((body[i],)) * (b & 0x3F)
+            i += 1
+        else:
+            data.append(b)
+    data = bytes(data[:need]).ljust(need, b"\0")
+    return b"".join(data[y * bpl:y * bpl + w] for y in range(h))
 
 
 def _pcx_palette(body: bytes) -> list[tuple[int, int, int]] | None:
@@ -332,7 +374,8 @@ def _pcx_palette(body: bytes) -> list[tuple[int, int, int]] | None:
 
 def _load_v1(data: bytes, ver) -> SFF:
     sff = SFF(ver)
-    _groups, count, off, _subsize, _paltype = struct.unpack_from("<IIIIB", data, 16)
+    _groups, count, off, _subsize, paltype = struct.unpack_from("<IIIIB", data, 16)
+    sff.v1_paltype = paltype                    # 1 = paleta compartilhada; volta igual ao gravar
     prev_pal: int | None = None
     for _ in range(count):
         if off == 0 or off + 32 > len(data):
@@ -353,7 +396,9 @@ def _load_v1(data: bytes, ver) -> SFF:
         else:
             pal_idx = prev_pal
         w, h = _pcx_size(body)
-        sff.sprites.append(Sprite(grp, item, w, h, ax, ay, FMT_PCX, 8, pal_idx, linked, body))
+        sff.sprites.append(Sprite(grp, item, w, h, ax, ay, FMT_PCX, 8, pal_idx, linked, body,
+                                  samepal=bool(samepal),
+                                  v1_pal=sff.palettes[pal_idx].key() if pal_idx is not None else None))
         prev_pal = pal_idx
         off = nxt
     return sff
@@ -485,13 +530,31 @@ def _write_v2(sff: SFF, compress5: str, compress8: str) -> bytes:
 
 def _write_v1(sff: SFF) -> bytes:
     subs: list[bytes] = []
+    sames: list[bool] = []
     groups = set()
     for i, s in enumerate(sff.sprites):
         groups.add(s.group)
         if s.is_truecolor:
             raise SFFError(tr("SFF v1 does not support truecolor (sprite {0},{1})").format(s.group, s.item))
+        # "mesma paleta do anterior": só vale se a paleta ainda é a do vizinho (reordenar ou trocar a
+        # paleta depois de abrir mudaria as cores). Gravar sempre 0 desligava a paleta do .act no MUGEN
+        follows = i > 0 and s.palette_index is not None and \
+            s.palette_index == sff.sprites[i - 1].palette_index
+        same = bool(s.samepal) and follows if s.samepal is not None and s._image is None else follows
+        sames.append(same)
         if s.fmt == FMT_PCX and s._image is None and s.linked_to is None:
             body = s._data
+            # o PCX intocado leva a paleta no fim: cores editadas ou paleta trocada no programa
+            # entram nela (copiar os bytes perdia a edição)
+            changed = s.palette_index is not None and 0 <= s.palette_index < len(sff.palettes) \
+                and sff.palettes[s.palette_index].key() != s.v1_pal
+            if not same and changed:
+                pal = bytes(sff.palettes[s.palette_index].flat())
+                has = len(body) >= 128 + 769 and body[-769] == 0x0C
+                if has and body[-768:] != pal:
+                    body = body[:-768] + pal
+                elif not has:
+                    body = body + b"\x0c" + pal
         elif s.linked_to is not None and s._image is None and s.linked_to < i:
             body = b""
         else:
@@ -502,14 +565,15 @@ def _write_v1(sff: SFF) -> bytes:
     out = bytearray(512)
     out[0:12] = SIGNATURE
     out[12:16] = bytes((0, 1, 0, 1))
-    struct.pack_into("<IIIIB", out, 16, len(groups), len(sff.sprites), 512, 32, 0)
+    struct.pack_into("<IIIIB", out, 16, len(groups), len(sff.sprites), 512, 32,
+                     getattr(sff, "v1_paltype", 0))
     out[36:36 + len(WRITER_COMMENT)] = WRITER_COMMENT
     pos = 512
     for i, (s, body) in enumerate(zip(sff.sprites, subs)):
         nxt = pos + 32 + len(body) if i + 1 < len(subs) else 0
         link = s.linked_to if not body else 0
         out += struct.pack("<IIhhHHHB13x", nxt, len(body), s.axis_x, s.axis_y,
-                           s.group, s.item, link or 0, 0)
+                           s.group, s.item, link or 0, int(sames[i]))
         out += body
         pos += 32 + len(body)
     sff.version = (1, 0, 1, 0)

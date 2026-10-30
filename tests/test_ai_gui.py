@@ -38,7 +38,8 @@ def gui(tmp_path, monkeypatch):
     yield app, ctx, win
     if ctx.char:
         ctx.char.dirty.clear()
-    win.close()
+    from conftest import dispose_window
+    dispose_window(win)
 
 
 def _wait(app, thread):

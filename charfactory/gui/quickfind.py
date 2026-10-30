@@ -67,7 +67,7 @@ def entries(win, page) -> tuple[str, list] | None:
     return None
 
 
-_SD = re.compile(r"^\s*\[\s*statedef\s+(-?\d+)\s*\]", re.I)
+_SD = re.compile(r"^\s*\[\s*statedef\s+(-?\d+)\s*[\];]", re.I)      # ; no cabeçalho do ZSS
 _ACTION = re.compile(r"^\s*\[\s*begin\s+action\s+(-?\d+)\s*\]", re.I)
 _COMMAND = re.compile(r"^\s*\[\s*command\s*\]", re.I)
 _ENTRY = re.compile(r"^\s*\[\s*state\s+-1\s*,\s*([^\]]*)\]", re.I)
@@ -83,6 +83,16 @@ def _comment(lines: list[str], k: int) -> str:
         j -= 1
     if j >= 0 and lines[j].lstrip().startswith(";"):
         return lines[j].lstrip(" \t;-=").strip()
+    return ""
+
+
+def _zss_comment(lines: list[str], k: int) -> str:
+    """No ZSS o nome do golpe vem num comentário # logo acima do [StateDef]."""
+    j = k - 1
+    while j >= 0 and not lines[j].strip():
+        j -= 1
+    if j >= 0 and lines[j].lstrip().startswith("#"):
+        return lines[j].lstrip(" \t#-=").strip()
     return ""
 
 
@@ -115,8 +125,9 @@ def _code_entries(win, page) -> tuple[str, list]:
             m = (_ACTION if page is win.air_code else _SD).match(line)
             if m:
                 n = int(m[1])
-                anim = _value(lines, k, "anim") if page is win.states else ""
-                name = _comment(lines, k) or (tr("anim {0}").format(anim) if anim else "")
+                zss = bool(f.get("zss"))
+                anim = _value(lines, k, "anim") if page is win.states and not zss else ""
+                name = (_zss_comment(lines, k) if zss else _comment(lines, k)) or (tr("anim {0}").format(anim) if anim else "")
                 out.append((f"{n}  {name}".rstrip(), where, lambda g=go, ln=k + 1: g(ln=ln)))
                 continue
             m = _ENTRY.match(line) if page is not win.air_code else None

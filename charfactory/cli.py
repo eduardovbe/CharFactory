@@ -69,7 +69,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--scale", type=int, default=2); s.add_argument("--out")
     s = sub.add_parser("mcp"); s.add_argument("char", nargs="?"); s.add_argument("--standalone", action="store_true")
     a = p.parse_args(argv)
+    try:
+        return _dispatch(a)
+    except (project.ProjectError, sff.SFFError, ValueError, KeyError, OSError) as e:
+        # erro de uso (arquivo, sprite ou ação que não existe): uma linha, sem traceback
+        print(f"charfactory {a.cmd}: {tr('error')}: {e}", file=sys.stderr)
+        return 1
 
+
+def _dispatch(a) -> int:
     def show(obj):
         print(json.dumps(obj, ensure_ascii=False, indent=1))
 
@@ -134,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             show(runner.run(c, a.p2, a.stage, engine=a.engine))
     elif a.cmd == "sim":
+        sds = c.all_statedefs()
+        missing = [n for n in a.states if n not in sds]
+        if missing:                  # antes simulava 900 ticks de nada e saía com sucesso
+            raise ValueError(tr("statedef {0} does not exist").format(", ".join(map(str, missing))))
         _sim(c, a)
     elif a.cmd == "view":
         img = render.sprite_image(c, a.group, a.item, a.palette)

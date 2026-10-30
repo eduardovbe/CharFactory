@@ -169,6 +169,66 @@ def test_p2stateno_trigger_follows_the_custom_state(tmp_path):
     assert sim.p2.custom == 0
 
 
+def test_finite_changestate_loop_on_the_same_tick(tmp_path):
+    """Helper que volta para o próprio estado até sysvar(3) chegar a 5 e então se destrói, tudo
+    no mesmo tick (issue #6): o VarAdd ignorava sysvar, o laço nunca acabava e o helper soltava
+    explods até o fim da simulação."""
+    from charfactory import project
+    from charfactory.tools import generate, ops, simulate
+    c = project.load(generate.new_character(tmp_path / "src", "S"))
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 0\nctrl = 0\n\n"
+        "[State 9970, fx]\ntype = Helper\ntrigger1 = time = 2\nstateno = 9971\nID = 9971\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 10\nvalue = 0\nctrl = 1\n"))
+    ops.set_statedef_text(c, 9971, (
+        "[Statedef 9971]\ntype = A\nmovetype = I\nphysics = N\nanim = 0\n\n"
+        "[State 9971, fx]\ntype = Explod\ntrigger1 = !time\nanim = 0\nremovetime = 60\n\n"
+        "[State 9971, conta]\ntype = VarAdd\ntrigger1 = !time\nsysvar(3) = 1\n\n"
+        "[State 9971, de novo]\ntype = ChangeState\ntrigger1 = sysvar(3) < 5\nvalue = stateno\n\n"
+        "[State 9971, fim]\ntype = DestroySelf\ntrigger1 = 1\n"))
+    sim = simulate.simulate(c, 9970, max_ticks=300)
+    loops = [e for e in sim.events if e["kind"] == "estado" and e["who"] != "P1"]
+    assert len(loops) == 5 and len({e["t"] for e in loops}) == 1
+    assert not any(h.alive for h in sim.helpers)
+    assert sum(e["kind"] == "explod" for e in sim.events) == 5
+    assert sim.tick < 300 and not any("loop" in k for k in sim.unsupported)
+
+
+def test_exit_conditions_the_simulator_used_to_miss(tmp_path):
+    """Mesma família da issue #6: quando o gatilho ou controlador da saída não era simulado, o
+    helper não se destruía e o golpe não acabava. Laço finito longo (andar 1 px por volta até o
+    chão), pi, ParentVarAdd, VarRangeSet e o ReversalDef que volta ao próprio estado."""
+    from charfactory import project
+    from charfactory.tools import generate, ops, simulate
+    c = project.load(generate.new_character(tmp_path / "src", "S"))
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = N\nanim = 0\nctrl = 0\n\n"
+        "[State 9970, fx]\ntype = Helper\ntrigger1 = !time\nstateno = 9971\nID = 9971\n\n"
+        "[State 9970, zera]\ntype = VarRangeSet\ntrigger1 = !time\nvalue = 3\nlast = 5\n\n"
+        "[State 9970, cai]\ntype = PosSet\ntrigger1 = time = 2\ny = -40\n\n"
+        "[State 9970, desce]\ntype = ChangeState\ntrigger1 = time = 3 && pos y < 0\nvalue = 9972\n"))
+    ops.set_statedef_text(c, 9971, (
+        "[Statedef 9971]\ntype = A\nmovetype = I\nphysics = N\nanim = 0\n\n"
+        "[State 9971, conta]\ntype = ParentVarAdd\ntrigger1 = 1\nvar(7) = 1\n\n"
+        "[State 9971, fim]\ntype = DestroySelf\ntrigger1 = time >= floor(pi)\n"))
+    ops.set_statedef_text(c, 9972, (
+        "[Statedef 9972]\ntype = A\nmovetype = A\nphysics = N\nanim = 0\n\n"
+        "[State 9972, passo]\ntype = PosAdd\ntrigger1 = 1\ny = 1\n\n"
+        "[State 9972, volta]\ntype = ChangeState\ntrigger1 = pos y < 0\nvalue = 9972\n\n"
+        "[State 9972, chao]\ntype = ChangeState\ntrigger1 = 1\nvalue = 9973\n"))
+    ops.set_statedef_text(c, 9973, (
+        "[Statedef 9973]\ntype = S\nmovetype = I\nphysics = S\nanim = 0\n\n"
+        "[State 9973, contra]\ntype = ReversalDef\ntrigger1 = 1\nreversal.attr = SCA, AA\n"
+        "p1stateno = 9973\n\n"
+        "[State 9973, fim]\ntype = ChangeState\ntrigger1 = time >= 20\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.simulate(c, 9970, max_ticks=200)
+    p1 = [e["value"] for e in sim.events if e["kind"] == "estado" and e["who"] == "P1"]
+    assert p1.count(9972) == 40 and p1[-1] == 0                 # 40 px, uma volta por px
+    assert sim.p1.vars[3] == sim.p1.vars[5] == 3 and sim.p1.vars[7] == 4
+    assert not any(h.alive for h in sim.helpers)
+    assert p1.count(9973) <= 2 and sim.tick < 200 and not sim.unsupported
+
+
 def test_p2_guard_follows_the_guardflag(mugen_dir):
     """O P2 que defende segura o que o guardflag cobre na postura dele: o soco baixo do kfm
     (guardflag = L) passa pela defesa em pé e para na agachada."""
@@ -202,6 +262,39 @@ def test_frame_data_matches_the_air_and_counts_advantage(mugen_dir):
     # CtrlSet no meio dos quadros ativos: livre antes do fim da Clsn1, sem recuperação
     fd = SIM.frame_data(SIM.simulate(c, 400, p2_dist=200))
     assert (fd["startup"], fd["active"], fd["recovery"], fd["total"]) == (3, 6, 0, 6)
+
+
+def test_guard_ctrltime_and_cancel_window(mugen_dir, tmp_path):
+    """Na defesa o P2 volta a agir no guard.ctrltime, antes do fim do bloqueio (guard.hittime):
+    a vantagem conta o controle e o bloqueio vem à parte. O cancelamento só vale no acerto ou
+    na defesa conforme o gatilho (movehit, moveguarded, movecontact) (issue #4)."""
+    import shutil
+    from charfactory import project
+    from charfactory.tools import ops, simulate as SIM
+    src = tmp_path / "kfm"
+    shutil.copytree(mugen_dir / "chars" / "kfm", src)
+    c = project.load(src / "kfm.def", mugen_dir)
+    base = ("[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 200\nctrl = 0\n\n"
+            "[State 9970, hd]\ntype = HitDef\ntrigger1 = !time\nattr = S, NA\nguardflag = MA\n"
+            "damage = 20\npausetime = 4, 4\nground.hittime = 12\nguard.hittime = 12\n{extra}\n"
+            "[State 9970, hit]\ntype = ChangeState\ntrigger1 = movehit && command = \"a\"\nvalue = 210\n\n"
+            "[State 9970, block]\ntype = ChangeState\ntrigger1 = moveguarded && command = \"a\"\nvalue = 230\n\n"
+            "[State 9970, fim]\ntype = ChangeState\ntrigger1 = animtime = 0\nvalue = 0\nctrl = 1\n")
+    ops.set_statedef_text(c, 9970, base.format(extra=""))
+    plain = SIM.frame_data(SIM.simulate(c, 9970, p2_dist=30, p2_guard=True))
+    ops.set_statedef_text(c, 9970, base.format(extra="guard.ctrltime = 5\n"))
+    fd = SIM.frame_data(SIM.simulate(c, 9970, p2_dist=30, p2_guard=True))
+    assert plain["outcome"] == fd["outcome"] == "defesa" and "advantage_stun" not in plain
+    assert fd["advantage"] == plain["advantage"] - 7 and fd["advantage_stun"] == plain["advantage"]
+    assert fd["cancel"]["into"] == [230]
+    hit = SIM.frame_data(SIM.simulate(c, 9970, p2_dist=30))
+    assert hit["outcome"] == "acerto" and hit["cancel"]["into"] == [210]
+    assert hit["cancel"]["window"] > 0 and hit["cancel"]["advantage"] > hit["advantage"]
+    assert SIM.cancel_targets(c, 9970) == {"acerto": {210}, "defesa": {230}}
+    # movehit || moveguarded cancela nos dois; !movehit não conta como cancelamento
+    ops.set_statedef_text(c, 9970, base.replace('= movehit && command = "a"', '= movehit || moveguarded')
+                          .replace('= moveguarded && command = "a"', '= !movehit && command = "a"').format(extra=""))
+    assert SIM.cancel_targets(c, 9970) == {"acerto": {210}, "defesa": {210}}
 
 
 def test_sound_track_mixes_the_move_sounds(mugen_dir):

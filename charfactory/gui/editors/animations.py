@@ -215,6 +215,7 @@ class AnimationEditor(QWidget):
         self.timeline.retimed.connect(self.retime)
         self.timeline.frameMoved.connect(self.move_frame)
         self.timeline.menuRequested.connect(self.frame_menu)
+        self.timeline.locked = bool(ctx.settings.get("timeline_locked", False))
         center = QWidget()
         cv = QVBoxLayout(center)
         cv.setContentsMargins(0, 0, 0, 0)
@@ -249,7 +250,7 @@ class AnimationEditor(QWidget):
         split.addWidget(center)
         split.addWidget(self.right)
         split.setSizes([900, 280])
-        split.setChildrenCollapsible(False)
+        split.setCollapsible(0, False)     # o painel da direita fecha arrastando a divisa até a borda
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(split)
@@ -865,7 +866,18 @@ class AnimationEditor(QWidget):
         m.addSeparator()
         rm = m.addAction(tr("Delete frame"), self.del_frame)
         rm.setEnabled(n > 1)
+        m.addSeparator()
+        lock = m.addAction(tr("Lock timing and order (click only selects)"), self.set_timeline_locked)
+        lock.setCheckable(True)
+        lock.setChecked(self.timeline.locked)
         m.exec(pos)
+
+    def set_timeline_locked(self, on: bool) -> None:
+        """Timeline só para escolher frames: arrastar não muda tempo nem ordem (fica gravado)."""
+        self.timeline.locked = on
+        self.timeline.update()
+        self.ctx.settings["timeline_locked"] = on
+        self.ctx.settings.save()
 
     def retime(self, times: list) -> None:
         """Tempos novos vindos do arrasto na timeline (um passo de desfazer)."""

@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Simulator: advantage on hit and on guard side by side, blockstun and cancel windows.
+- Zoom below 1x for giant sprites, centered on the mouse.
+- Timeline: arrows go to the previous/next frame and the timing can be locked.
+- View › Show/hide right panel (Ctrl+Alt+N); the side panel also collapses by dragging.
+- ZSS: `while`, `break`, `continue` and loops with game limits now run in the simulator.
+- Ikemen GO 1.0 data updated, with `common.const` built in.
+
+### Fixed
+
+- The simulator no longer hangs on moves that loop ChangeState a few times in the same tick.
+- Effects and helpers that wait on `pi`, `ParentVarAdd`, `VarRangeSet` or the camera now end in the simulator.
+- A parry with ReversalDef no longer repeats forever in the simulator.
+- Clicking a frame on the timeline selects it without changing its time.
+- ZSS files show as ZSS in the States editor, with their own highlighting, and save as ZSS.
+- Moves from a ZSS `[StateDef -1]` show up as moves in the simulator.
+- Ikemen constants like `const(StateStand)` are no longer flagged as errors without Ikemen installed.
+- `PlayerID`, `TeamMode` and `Name` triggers work in the simulator.
+- Saving no longer damages Japanese (Shift-JIS) text or changes the line endings of ZSS files.
+- SFF v1 stays v1 when saved, keeps its shared palettes and keeps palette edits.
+- Truncated PCX sprites load again and no longer block saving.
+- Snippets and controllers inserted in a ZSS tab come in as ZSS.
+- The effect check no longer fails when the hit lands on the last tick.
+- Damaged sprites show as blank instead of breaking the editor.
+- The command line prints a short error instead of a traceback.
+
 ## [0.4.0] - 2026-10-26
 
 ### Added

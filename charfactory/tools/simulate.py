@@ -33,6 +33,8 @@ from ..i18n import tr
 
 # --------------------------------------------------------------------- leitura do CNS
 
+P1_ID, P2_ID = 56, 57    # PlayerID com dois jogadores (MUGEN/Ikemen); helpers a partir de 58
+
 
 def _blocks(text: str) -> list[dict]:
     """Controladores de um statedef: cabeçalho, tipo e TODOS os gatilhos e parâmetros."""
@@ -130,6 +132,7 @@ class Entity:
     invisible: bool = False
     is_helper: bool = False
     helper_id: int = 0
+    pid: int = P1_ID                      # PlayerID (o gatilho id e o redirecionamento playerid)
     parent: "Entity | None" = None
     root: "Entity | None" = None
     scale: tuple = (1.0, 1.0)
@@ -225,7 +228,7 @@ class Entity:
         if name == "numhelper":
             return sum(1 for h in s.helpers if h.alive and (arg is None or h.helper_id == arg))
         if name == "numexplod":
-            return sum(1 for e in s.explods if e.alive and (arg is None or e.id == arg))
+            return sum(1 for e in s.live_explods if e.alive and (arg is None or e.id == arg))
         if name == "numenemy":
             return 1
         if name == "ctrl":
@@ -234,6 +237,8 @@ class Entity:
             return 0
         if name == "roundstate":
             return 2
+        if name in ("roundno", "roundsexisted"):   # 1º round da luta
+            return 1 if name == "roundno" else 0
         if name == "alive":
             return 1
         if name == "ishelper":
@@ -264,16 +269,56 @@ class Entity:
             return 1 if s.char.anims.get(int(arg)) is not None else 0
         if name in ("const240p", "const480p", "const720p"):   # localcoord 320x240
             return arg * {"const240p": 1, "const480p": 0.5, "const720p": 0.25}[name]
-        if name == "screenwidth":
+        if name in ("screenwidth", "gamewidth"):
             return 320
-        if name == "screenheight":
+        if name in ("screenheight", "gameheight"):
             return 240
+        # constantes e medidas que os chars usam para decidir quando o efeito acaba: sem elas a
+        # condição falhava, o helper não se destruía e o golpe não terminava (como na issue #6)
+        if name == "pi":
+            return math.pi
+        if name == "e":
+            return math.e
+        if name == "camerapos x":
+            return 0.0
+        if name == "camerapos y":
+            return 0.0
+        if name in ("leftedge", "rightedge"):          # bordas da tela em coordenadas do palco
+            return -160 if name == "leftedge" else 160
+        if name in ("topedge", "bottomedge"):
+            return -200 if name == "topedge" else 40
+        if name in ("parentdist x", "rootdist x"):
+            o = (self.parent if name[0] == "p" else self.root) or self
+            return (o.pos[0] - self.pos[0]) * self.facing
+        if name in ("parentdist y", "rootdist y"):
+            o = (self.parent if name[0] == "p" else self.root) or self
+            return o.pos[1] - self.pos[1]
+        if name == "palno":
+            return 1
+        if name == "tickspersecond":
+            return 60
+        if name == "p2life":
+            return s.p2.life
+        if name == "winko":
+            return 0
         if name == "teamside":
             return 1
         if name == "inguarddist":
             return 0
         if name == "id":
-            return id(self) % 10000
+            return self.pid
+        if name == "playeridexist":
+            return 1 if s.by_pid(int(arg or 0)) is not None else 0
+        if name == "teammode":
+            return "single"
+        if name == "gamemode":
+            return "versus"
+        if name in ("name", "p1name", "displayname"):
+            return s.char.info("name", "").strip('"')
+        if name == "authorname":
+            return s.char.info("author", "").strip('"')
+        if name in ("p2name", "p3name", "p4name"):
+            return ""
         if name == "matchover":
             return 0
         if name == "win" or name == "lose":
@@ -309,6 +354,8 @@ class Entity:
                 if h.alive and (arg is None or h.helper_id == arg):
                     return h
             return s.standing_helper(arg)
+        if kind == "playerid":
+            return s.by_pid(int(arg or 0))
         return None
 
     # ---- animação
@@ -429,6 +476,7 @@ class Dummy:
     state: str = "stand"
     shake: int = 0
     hittime: int = 0
+    ctrltime: int = 0        # defesa: ticks até o P2 voltar a ter ctrl (guard.ctrltime)
     fall: bool = False
     t: int = 0
     hits: int = 0
@@ -473,6 +521,10 @@ class Dummy:
             return self.t
         if name == "alive":
             return 1
+        if name == "id":
+            return P2_ID
+        if name in ("name", "displayname", "authorname"):
+            return ""
         raise simexpr.Unsupported(tr("opponent trigger {0}").format(name))
 
     def redirect(self, kind, arg):
@@ -493,7 +545,7 @@ class Dummy:
 
 # --------------------------------------------------------------------- simulador
 
-CTRL_IGNORED = {"playsnd", "stopsnd", "screenbound", "nothitby", "hitby",
+CTRL_IGNORED = {"null", "playsnd", "stopsnd", "screenbound", "nothitby", "hitby",
                 "afterimage", "afterimagetime", "envshake", "envcolor", "assertspecial_",
                 "makedust", "sndpan", "width", "attackmulset", "defencemulset", "hitoverride",
                 "posfreeze", "lifeadd", "lifeset", "displaytoclipboard", "appendtoclipboard",
@@ -505,6 +557,10 @@ CTRL_IGNORED = {"playsnd", "stopsnd", "screenbound", "nothitby", "hitby",
 # controladores registrados como evento "ctrl" (som, tremor, cor, rastro, sumir, prender)
 REVERSAL_T = 8           # tick da janela do ReversalDef em que o boneco "ataca" o contra
 HELPER_MAX = 56          # helpers vivos por jogador (MUGEN 1.1)
+EXPLOD_MAX = 512         # explods vivos (ExplodMax do mugen.cfg)
+# trocas de estado num tick: há laços finitos longos (voltar ao próprio estado andando 1 px por
+# volta até tocar o chão, contar sysvar até 5); passar disso é laço sem fim
+LOOP_MAX = 2500
 CTRL_LOGGED = {"playsnd", "envshake", "palfx", "bgpalfx", "allpalfx", "envcolor", "afterimage",
                "assertspecial", "targetbind", "bindtotarget", "targetstate", "posadd", "posset",
                "turn", "superpause", "pause", "projectile", "angledraw", "makedust",
@@ -530,8 +586,10 @@ class Sim:
         self.events: list[dict] = []
         self.helpers: list[Entity] = []
         self.explods: list[Explod] = []
+        self.live_explods: list[Explod] = []       # só as vivas (o passo tira as que saíram)
         self.pause = 0
         self.pause_owner: Entity | None = None
+        self._reversed = False                    # o boneco já "atacou" o ReversalDef
         self.max_ticks = max_ticks
         self.ikemen = bool(getattr(char, "is_zss", False))   # regras do Ikemen (expressões, física)
         try:                                       # localcoord do char / 320 (escala dos limites)
@@ -575,6 +633,9 @@ class Sim:
                 if sec.name.lower() in ("data", "size", "velocity", "movement"):
                     for k, v in sec.as_dict().items():
                         out[f"{sec.name.lower()}.{k.lower()}"] = v
+                elif sec.name.lower() == "constants":     # Ikemen: const(MeuValor), por cima do common.const
+                    for k, v in sec.as_dict().items():
+                        out[k.lower()] = v
         except Exception:
             pass
         return out
@@ -590,7 +651,14 @@ class Sim:
                     return vals[min(idx, len(vals) - 1)]
         defaults = {"movement.yaccel": 0.44, "movement.stand.friction": 0.85,
                     "movement.crouch.friction": 0.82, "size.height": 60}
-        return defaults.get(key, 0)
+        if key in defaults:
+            return defaults[key]
+        if self.ikemen:              # common.const do Ikemen: StateStand, FxDizzyEffect…
+            from ..formats.zssread import common_consts
+            v = re.fullmatch(r"\s*(-?\d*\.?\d+)\s*", common_consts().get(key, ""))
+            if v:
+                return float(v.group(1))
+        return 0
 
     def _stand_height(self):
         f = frame_at(self.char, 0, 0)
@@ -607,6 +675,12 @@ class Sim:
 
     def note(self, msg):
         self.unsupported[msg] = self.unsupported.get(msg, 0) + 1
+
+    def by_pid(self, n: int):
+        """Quem tem esse PlayerID: o P1, o boneco (P2) ou um helper vivo."""
+        if n == P2_ID:
+            return self.p2
+        return next((e for e in [self.p1, *self.helpers] if e.alive and e.pid == n), None)
 
     def standing_helper(self, hid):
         """Helper que o char cria no começo da luta e lê o tempo todo (ex.: Helper(999999) com
@@ -752,8 +826,10 @@ class Sim:
             if not changed:
                 return
             switches += 1
-            if switches > 8:
+            if switches > LOOP_MAX:
+                # laço sem fim: a simulação para aqui (repetir o laço todo tick travava a tela)
                 self.note(tr("ChangeState loop on the same tick"))
+                self.max_ticks = min(self.max_ticks, self.tick + 1)
                 return
 
     def _triggered(self, ent, c):
@@ -798,7 +874,7 @@ class Sim:
         if typ == "assertspecial" and (ent.root or ent) is self.p1 and "nobg" in " ".join(
                 p.get(k, "").lower() for k in ("flag", "flag2", "flag3")):
             self._nobg_tick = self.tick       # cena: o cenário some (fundo preto) neste tick
-        if typ == "reversaldef" and ent is self.p1 and "p1stateno" in p and ent.time >= REVERSAL_T                 and self.p2.state == "stand" and self._reversal_touch(ent):
+        if typ == "reversaldef" and ent is self.p1 and "p1stateno" in p and ent.time >= REVERSAL_T                 and self.p2.state == "stand" and not self._reversed and self._reversal_touch(ent):
             # o boneco não ataca: no contra-ataque ele "ataca" no tick REVERSAL_T da janela, perto,
             # e o contra dispara (sem isso a simulação via só a pose de guarda e nunca o contra). No
             # MUGEN o ReversalDef só pega golpe cuja Clsn1 toca uma Clsn1 de quem contra-ataca:
@@ -808,6 +884,9 @@ class Sim:
                                 "root_state": ent.stateno, "arg": ""})
             pt = [x.strip() for x in p.get("pausetime", "0,0").split(",")]
             self.p2.shake = int(self.ev(ent, pt[-1], 0)) if pt[-1] else 0
+            # uma vez só: com p1stateno = o próprio estado o tempo voltava a 0 e o boneco
+            # "atacava" de novo a cada REVERSAL_T ticks, sem o golpe nunca acabar
+            self._reversed = True
             self.enter(ent, int(g("p1stateno")))
             return "changed"
         if typ in ("changestate", "selfstate"):
@@ -864,18 +943,22 @@ class Sim:
                 if v:
                     setattr(ent, attr, v)
             return
+        if typ in ("parentvarset", "parentvaradd"):
+            # mesma conta do VarSet/VarAdd, nas variáveis do pai (sem pai: o MUGEN ignora)
+            if ent.parent is not None:
+                self._set_vars(ent, ent.parent, p, typ == "parentvaradd")
+            return
+        if typ == "varrangeset":
+            # var(first)..var(last) = value, ou fvar com fvalue (padrões 0 e 59 / 39)
+            fl = "fvalue" in p
+            d = ent.fvars if fl else ent.vars
+            val = g("fvalue" if fl else "value")
+            lo, hi = int(g("first", 0)), int(g("last", 39 if fl else 59))
+            for n in range(lo, hi + 1):
+                d[n] = val if fl else int(val)
+            return
         if typ in ("varset", "varadd"):
-            for k, v in p.items():
-                m = re.fullmatch(r"(f?var|zsslocal)\((\d+)\)", k)
-                if m:
-                    d = {"fvar": ent.fvars, "var": ent.vars, "zsslocal": ent.locals}[m.group(1)]
-                    val = self.ev(ent, v, 0)
-                    d[int(m.group(2))] = (d.get(int(m.group(2)), 0) + val) if typ == "varadd" else val
-            if "v" in p or "fv" in p:
-                d = ent.fvars if "fv" in p else ent.vars
-                n = int(g("fv" if "fv" in p else "v"))
-                val = g("value")
-                d[n] = (d.get(n, 0) + val) if typ == "varadd" else val
+            self._set_vars(ent, ent, p, typ == "varadd")
             return
         if typ == "varrandom":
             n = int(g("v"))
@@ -919,7 +1002,7 @@ class Sim:
             return
         if typ == "removeexplod":
             i = int(g("id", -1))
-            for e in self.explods:
+            for e in self.live_explods:
                 if e.owner is ent and (i < 0 or e.id == i):
                     e.alive = False
             return
@@ -966,9 +1049,31 @@ class Sim:
         if typ == "projectile":
             self.note(tr("Projectile is not simulated"))
             return
+        if typ == "zssloopcut":                   # marcador do ZSS rebaixado: o laço passou do limite
+            self.note(tr("ZSS loop cut at {0} turns").format(p.get("turns", "?")))
+            return
         if typ in CTRL_IGNORED or typ.startswith("snd"):
             return
         self.note(tr("controller {0} not simulated").format(typ))
+
+    def _set_vars(self, ent: Entity, dest: Entity, p: dict, add: bool) -> None:
+        """VarSet/VarAdd (e ParentVar*): as expressões valem para `ent`, o resultado vai para as
+        variáveis de `dest`. var e sysvar guardam inteiro."""
+        def put(d, n, val, whole):
+            val = int(val) if whole else val
+            d[n] = d.get(n, 0) + val if add else val
+        for k, v in p.items():
+            m = re.fullmatch(r"((?:sys)?f?var|zsslocal)\((\d+)\)", k)
+            if m:
+                # sysvar(n) também: o laço finito "ChangeState para si mesmo até sysvar(3) = 5"
+                # nunca acabava sem ele (issue #6)
+                d = {"fvar": dest.fvars, "var": dest.vars, "sysvar": dest.sysvars,
+                     "sysfvar": dest.sysfvars, "zsslocal": dest.locals}[m.group(1)]
+                put(d, int(m.group(2)), self.ev(ent, v, 0), m.group(1) in ("var", "sysvar"))
+        if "v" in p or "fv" in p:
+            fl = "fv" in p
+            n = int(self.ev(ent, p["fv" if fl else "v"], 0))
+            put(dest.fvars if fl else dest.vars, n, self.ev(ent, p.get("value", "0"), 0), not fl)
 
     def ev_triple(self, ent, v, default=0):
         parts = _split_args(v)
@@ -981,6 +1086,9 @@ class Sim:
         anim = int(g("anim", -1)) if not p.get("anim", "").upper().startswith("F") else -1
         if anim < 0:
             self.note(tr("Explod with a fightfx anim (F...) not drawn"))
+            return
+        if len(self.live_explods) >= EXPLOD_MAX:
+            self.note(tr("Explod limit reached ({0})").format(EXPLOD_MAX))
             return
         ox, oy = self.evpair(ent, p.get("pos", "0,0"))
         postype = p.get("postype", "p1").lower()
@@ -1019,6 +1127,7 @@ class Sim:
                               for ts in [c["triggerall"], *c["triggers"].values()] for t in ts),
                    alpha=self.evpair(ent, p["alpha"], (256, 256)) if "alpha" in p else None)
         self.explods.append(e)
+        self.live_explods.append(e)
         self.events.append({"t": self.tick, "who": ent.name, "kind": "explod", "value": anim,
                             "label": c["label"]})
 
@@ -1041,6 +1150,8 @@ class Sim:
         h = Entity(self, f"helper {int(g('id', 0))}", int(g("stateno", 0)))
         h.is_helper = True
         h.helper_id = int(g("id", 0))
+        self._next_pid = getattr(self, "_next_pid", P2_ID) + 1
+        h.pid = self._next_pid
         h.parent, h.root = ent, root
         h.facing = ent.facing * (1 if int(g("facing", 1)) >= 0 else -1)
         h.pos = [bx + ox * (bf if postype != "p2" else bf), by + oy]
@@ -1246,13 +1357,17 @@ class Sim:
         gv = self.ev(ent, p["guard.velocity"], 0) if "guard.velocity" in p else g("ground.velocity", (0, 0))[0]
         d.vel = [float(gv) * -ent.facing, 0.0]
         d.hittime = int(self.ev(ent, p.get("guard.hittime", p.get("ground.hittime", "15")), 15))
+        # common1.cns (151/153): CtrlSet em Time = GetHitVar(ctrltime) e 130 no HitOver; o
+        # ctrltime cai no guard.slidetime, que cai no guard.hittime
+        slide = int(self.ev(ent, p["guard.slidetime"], d.hittime)) if "guard.slidetime" in p else d.hittime
+        d.ctrltime = int(self.ev(ent, p["guard.ctrltime"], slide)) if "guard.ctrltime" in p else slide
         d.state, d.t = "guardhit", 0
         d.facing = -ent.facing
         self.events.append({"t": self.tick, "who": ent.name, "kind": "defesa", "label": hd["label"],
                             "ci": hd.get("index"),
                             "contact": contact, "state": ent.stateno, "root_state": (ent.root or ent).stateno,
                             "pause": [int(pt[0]), int(pt[1])], "hittime": d.hittime,
-                            "dealt": dmg["guard"], "p1power": dmg["p1gpower"], "p2power": dmg["p2gpower"],
+                            "ctrltime": d.ctrltime, "dealt": dmg["guard"], "p1power": dmg["p1gpower"], "p2power": dmg["p2gpower"],
                             "life": d.life, "attr": p.get("attr", "").strip(),
                             "snd": self._sound(ent, p.get("guardsound", "6,0"), hitdef=True)})
 
@@ -1266,6 +1381,7 @@ class Sim:
             d.pos[0] += d.vel[0]
             d.vel[0] *= 0.88
             d.hittime -= 1
+            d.ctrltime -= 1
             if d.hittime <= 0:
                 d.state, d.vel = "stand", [0.0, 0.0]
         elif d.state in ("fall", "air"):
@@ -1357,7 +1473,8 @@ class Sim:
                 ent.pausemove -= 1
         if not paused:
             self.step_dummy()
-        for e in self.explods:
+        ends_at: dict[int, int | None] = {}      # anim → tick em que a explod sai (None = nunca)
+        for e in self.live_explods:
             if not e.alive:
                 continue
             if paused:
@@ -1371,12 +1488,16 @@ class Sim:
                 e.pos[0] += e.vel[0] * e.facing
                 e.pos[1] += e.vel[1]
                 e.vel = (e.vel[0] + e.accel[0], e.vel[1] + e.accel[1])
-            a = self.char.anims.get(e.anim)
-            # só um quadro de tempo -1 segura a anim para sempre; tempo 0 (comum no último
-            # quadro das faíscas) não: com ele a explod nunca saía e o helper que espera
-            # !NumExplod para se destruir ficava na tela até o fim
-            ends = a is not None and a.total_time > 0 and all(f.time >= 0 for f in a.frames)
-            if e.removetime == -2 and (a is None or (ends and e.t >= a.total_time)):
+            if e.anim not in ends_at:
+                a = self.char.anims.get(e.anim)
+                # só um quadro de tempo -1 segura a anim para sempre; tempo 0 (comum no último
+                # quadro das faíscas) não: com ele a explod nunca saía e o helper que espera
+                # !NumExplod para se destruir ficava na tela até o fim
+                tt = a.total_time if a is not None else 0
+                ends_at[e.anim] = (0 if a is None else
+                                   tt if tt > 0 and all(f.time >= 0 for f in a.frames) else None)
+            end = ends_at[e.anim]
+            if e.removetime == -2 and end is not None and e.t >= end:
                 e.alive = False
             elif e.removetime >= 0 and e.t > e.removetime:
                 e.alive = False
@@ -1384,8 +1505,9 @@ class Sim:
             self.pause -= 1
         self._paused_at_start = paused            # o que o Ikemen registra como pausa do tick
         self.snapshot()
-        for e in self.explods:
-            if e.alive and (not paused or e.pausemove > 0):
+        self.live_explods = [e for e in self.live_explods if e.alive]
+        for e in self.live_explods:
+            if not paused or e.pausemove > 0:
                 e.t += 1
         self.tick += 1
 
@@ -1410,12 +1532,15 @@ class Sim:
         p1.started = False                     # o tick 0 do golpe novo roda no próximo passo
 
     def run(self, until_idle: bool = True):
+        if self.statedef(self.p1.stateno) is None:   # estado que não existe: um tick só, com a nota
+            self.step()
+            return self
         while self.tick < self.max_ticks:
             self.step()
             if self.chain:
                 self.chain_step()
             if until_idle and self.p1.stateno in (0, 52, 11, 20) and self.tick > 5 \
-                    and not any(h.alive for h in self.helpers) and not any(e.alive for e in self.explods) \
+                    and not any(h.alive for h in self.helpers) and not self.live_explods \
                     and self.p2.state in ("stand", "down"):
                 break
         return self
@@ -1442,7 +1567,7 @@ class Sim:
                              atk=bool(ent.hitdef),
                              guardflag=(ent.hitdef or {}).get("params", {}).get("guardflag", "").upper()))
         exps, scr = [], []
-        for e in self.explods:
+        for e in self.live_explods:
             if e.alive and e.space == "screen":
                 # cut-in, camadas da cena: fora das medidas do palco, mas a folha tick a tick
                 # desenha (em coordenadas da tela 320x240)
@@ -1464,7 +1589,11 @@ class Sim:
                                helper_states=sorted({h.stateno for h in self.helpers if h.alive}),
                                p2=dict(pos=tuple(self.p2.pos), state=self.p2.state,
                                        facing=self.p2.facing, shake=self.p2.shake,
-                                       pose=self.p2.pose, guard=self.p2.guard),
+                                       pose=self.p2.pose, guard=self.p2.guard,
+                                       # pode agir: parado, ou na defesa depois do guard.ctrltime
+                                       ctrl=self.p2.state == "stand" or (
+                                           self.p2.state == "guardhit" and not self.p2.shake
+                                           and self.p2.ctrltime <= 0 and not self.p2.custom)),
                                p2box=self.p2_box(),
                                pause=self.pause > 0,
                                paused=getattr(self, "_paused_at_start", False),
@@ -1944,7 +2073,8 @@ def audit(sim: Sim) -> list[dict]:
     # oponente jogado para o lado do atacante no fim
     if acts and len(sim.track) > 2:
         p1x = sim.track[-1]["ents"][0]["pos"][0] if sim.track[-1]["ents"] else 0
-        first = next(r for r in sim.track if r["t"] > acts[-1]["t"])
+        # acerto no último tick simulado: não há tick depois dele (StopIteration derrubava a auditoria)
+        first = next((r for r in sim.track if r["t"] > acts[-1]["t"]), sim.track[-1])
         p2a = first["p2"]["pos"][0]
         p2b = sim.track[-1]["p2"]["pos"][0]
         # a velocidade do acerto no mundo aponta para o lado do atacante (helper que vem de frente
@@ -2015,12 +2145,83 @@ def frame_data(sim: Sim) -> dict:
     if contacts:
         last_t = contacts[-1]["t"]
         after = [i for i, r in enumerate(track) if r["t"] > last_t]
+        # na defesa o P2 volta a agir no guard.ctrltime, que pode vir antes do fim do bloqueio
+        p2_ctrl = next((i for i in after if track[i]["p2"].get("ctrl", track[i]["p2"]["state"] == "stand")), None)
         p2_free = next((i for i in after if track[i]["p2"]["state"] == "stand"), None)
         down = any(track[i]["p2"]["state"] in ("fall", "down") for i in after)
         out["knockdown"] = down or any(e.get("fall") or e.get("p2state") for e in contacts[-1:])
-        if p2_free is not None and not out["knockdown"] and free < len(track):
-            out["advantage"] = p2_free - free
+        if p2_ctrl is not None and not out["knockdown"] and free < len(track):
+            out["advantage"] = p2_ctrl - free
+            if p2_free is not None and p2_free != p2_ctrl:
+                out["advantage_stun"] = p2_free - free      # fim do bloqueio (HitOver)
+        out["cancel"] = _cancel_data(sim, track, p1, contacts, p2_ctrl, out["outcome"])
     return out
+
+
+def cancel_targets(char, state: int, sds=None) -> dict:
+    """Para onde o golpe cancela ao encostar: {"acerto": {...}, "defesa": {...}}. ChangeState
+    com movehit só cancela no acerto, com moveguarded só na defesa, com movecontact nos dois;
+    vale o do próprio estado e o do [Statedef -1] com `stateno = ...` que o cobre."""
+    sds = sds or char.all_statedefs(include_common=False)
+    out = {"acerto": set(), "defesa": set()}
+    for n, (sd, _) in sds.items():
+        if n != state and n != -1:
+            continue
+        for c in sd.controllers:
+            if c.type.lower() != "changestate":
+                continue
+            t = " ".join(x for v in c.triggers().values() for x in v).lower()
+            v = _lit(c.section.get("value"))
+            if v is None or v == state or not re.search(r"move(contact|hit|guarded)", t):
+                continue
+            if n == -1:
+                covers = any(int(a) <= state <= int(b or a) for a, b in
+                             re.findall(r"stateno\s*=\s*\[?\s*(\d+)\s*(?:,\s*(\d+))?", t))
+                if not covers:
+                    continue
+            # o que o gatilho pede, sem contar os negados (!movehit não é "cancela no acerto")
+            has = {w for w in ("movecontact", "movehit", "moveguarded")
+                   if re.search(rf"(?<![!\w]){w}\b", t)}
+            kinds = set()
+            if "movecontact" in has or {"movehit", "moveguarded"} <= has:
+                kinds = {"acerto", "defesa"}                  # movehit || moveguarded = os dois
+            elif "movehit" in has:
+                kinds = {"acerto"}
+            elif "moveguarded" in has:
+                kinds = {"defesa"}
+            for k in kinds:
+                out[k].add(v)
+    return out
+
+
+def _cancel_data(sim: Sim, track, p1, contacts, p2_ctrl, outcome) -> dict | None:
+    """Janela de cancelamento do golpe simulado ("from" = quadro do golpe, pausas fora): do
+    primeiro tick depois do 1º contato em que o
+    P1 já anda (fora da pausa do acerto) até o último tick ainda no estado do golpe; e a
+    vantagem de cancelar o mais cedo depois do último contato (quantos ticks o P2 ainda fica
+    preso: o golpe seguinte precisa sair antes disso para emendar)."""
+    if outcome not in ("acerto", "defesa") or len(sim.chain) > 1:
+        return None
+    state = p1[0]["state"] if p1 and p1[0] else None
+    if state is None:
+        return None
+    into = sorted(cancel_targets(sim.char, state)[outcome])
+    if not into:
+        return None
+
+    def first_free_after(t):
+        return next((i for i, (r, e) in enumerate(zip(track, p1)) if r["t"] > t and e
+                     and not e.get("frozen") and not r["pause"]), None)
+    start, last = first_free_after(contacts[0]["t"]), first_free_after(contacts[-1]["t"])
+    if start is None or p1[start]["state"] != state:
+        return None
+    end = start
+    while end + 1 < len(track) and p1[end + 1] and p1[end + 1]["state"] == state:
+        end += 1
+    moving = sum(1 for i in range(start, end + 1) if not track[i]["pause"] and not p1[i].get("frozen"))
+    adv = p2_ctrl - last if p2_ctrl is not None and last is not None and last <= end else None
+    frame = 1 + sum(1 for i in range(start) if not track[i]["pause"] and not (p1[i] or {}).get("frozen"))
+    return {"into": into, "from": frame, "window": moving, "advantage": adv}
 
 
 _ENGINE_SND: dict[str, object] = {}
@@ -2165,8 +2366,19 @@ def combo_graph(char, sds=None) -> dict:
 def move_states(char) -> list[int]:
     """Estados com comando no .cmd entre 200 e 3999 (menos o 500 de carregar)."""
     t = char.commands.doc.to_text()     # o texto em memória: um golpe novo ainda não salvo já conta
-    return sorted({int(v) for v in re.findall(r"(?im)^\s*value\s*=\s*(\d+)\s*$", t)
-                   if 200 <= int(v) < 4000 and int(v) != 500})
+    found = {int(v) for v in re.findall(r"(?im)^\s*value\s*=\s*(\d+)\s*$", t)}
+    # o [Statedef -1] também pode estar nos arquivos de estado (no ZSS, command.zss): o rebaixado
+    # para CNS dá os ChangeState de lá
+    try:
+        neg = char.all_statedefs(include_common=False).get(-1)
+    except Exception:  # noqa: BLE001 — texto com erro: fica com o .cmd
+        neg = None
+    if neg:
+        for c in neg[0].controllers:
+            v = _lit(c.section.get("value")) if (c.type or "").lower() == "changestate" else None
+            if v is not None:
+                found.add(v)
+    return sorted(v for v in found if 200 <= v < 4000 and v != 500)
 
 
 def damage_report(sim) -> dict:

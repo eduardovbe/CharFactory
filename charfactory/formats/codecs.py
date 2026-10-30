@@ -67,6 +67,14 @@ def encode_rle8(pixels: bytes) -> bytes:
 
 def decode_rle5(src: bytes, size: int) -> bytearray:
     out = bytearray()
+    try:
+        _rle5(src, size, out)
+    except IndexError:          # dados cortados: fica o que deu para ler (o MUGEN desenha assim)
+        pass
+    return out[:size]
+
+
+def _rle5(src: bytes, size: int, out: bytearray) -> None:
     i = 0
     while i + 1 < len(src) and len(out) < size:
         run_len, data_len = src[i], src[i + 1]; i += 2
@@ -77,13 +85,20 @@ def decode_rle5(src: bytes, size: int) -> bytearray:
         for _ in range(data_len & 0x7F):
             b = src[i]; i += 1
             out += bytes([b & 0x1F]) * ((b >> 5) + 1)
-    return out[:size]
 
 
 # ------------------------------------------------------------------ LZ5
 
 def decode_lz5(src: bytes, size: int) -> bytearray:
     out = bytearray()
+    try:
+        _lz5(src, size, out)
+    except IndexError:          # dados cortados: fica o que deu para ler (o MUGEN desenha assim)
+        pass
+    return out[:size]
+
+
+def _lz5(src: bytes, size: int, out: bytearray) -> None:
     i = 0
     flags = bit = 0
     recycled = recycled_count = 0
@@ -115,7 +130,6 @@ def decode_lz5(src: bytes, size: int) -> bytearray:
             for k in range(length):      # a cópia pode sobrepor o destino
                 out.append(out[start + k] if start + k >= 0 else 0)
         bit = (bit + 1) & 7
-    return out[:size]
 
 
 _LZ5_WINDOW = 1024     # distância máxima da cópia longa (offset de 10 bits + 1)

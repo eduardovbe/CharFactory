@@ -206,6 +206,64 @@ class MugenHighlighter(QSyntaxHighlighter):
         self._value(body, 0, len(body), None)  # linhas sem '=': frames do AIR, sequências de comando
 
 
+_ZSS_TOKENS = re.compile(r'"[^"]*"?'                      # texto
+                         r'|\$[A-Za-z_]\w*'               # local ($x)
+                         r'|-?\d+\.\d*|-?\.\d+|-?\d+'     # números
+                         r'|[A-Za-z_][A-Za-z0-9_.]*'      # identificadores
+                         r'|:=|&&|\|\||\^\^|!=|<=|>=|\*\*|[=<>!+\-*/%&|^~]'
+                         r'|[()\[\],{}:;]')
+_ZSS_KEYWORDS = {"if", "else", "switch", "case", "default", "for", "while", "break", "continue",
+                 "let", "call", "in", "persistent", "ignorehitpause", "statedef", "function"}
+
+
+class ZssHighlighter(MugenHighlighter):
+    """Realce para ZSS (Ikemen GO): `#` é comentário e `;` separa comandos (no CNS `;` abria
+    comentário e o resto da linha ficava cinza). Palavras do ZSS, controladores antes de `{`,
+    parâmetros antes de `:` e locais `$x`."""
+
+    @staticmethod
+    def _comment_at(text: str) -> int:
+        quoted = False
+        for i, ch in enumerate(text):
+            if ch == '"':
+                quoted = not quoted
+            elif ch == "#" and not quoted:
+                return i
+        return len(text)
+
+    def highlightBlock(self, text: str) -> None:
+        cut = self._comment_at(text)
+        if cut < len(text):
+            self.setFormat(cut, len(text) - cut, self.f["comment"])
+        toks = list(_ZSS_TOKENS.finditer(text[:cut]))
+        for k, t in enumerate(toks):
+            tok, low = t.group(0), t.group(0).lower()
+            nxt = toks[k + 1].group(0) if k + 1 < len(toks) else ""
+            if tok.startswith('"'):
+                fmt = self.f["string"]
+            elif tok.startswith("$"):
+                fmt = self.f["const"]
+            elif tok[0].isdigit() or (tok[0] in "-." and len(tok) > 1 and tok[-1].isdigit()):
+                fmt = self.f["number"]
+            elif low in _ZSS_KEYWORDS:
+                fmt = self.f["block_strong"] if low in ("statedef", "function") else self.f["key_trigger"]
+            elif nxt == "{" and (low in self.controllers or tok[:1].isalpha()):
+                fmt = self.f["type_value"]          # velSet{ … }
+            elif nxt == ":" and tok[:1].isalpha():
+                fmt = self.f["keyword"]             # x: 0
+            elif tok in "()[],{}:;" or _OPS.fullmatch(tok):
+                fmt = self.f["operator"]
+            elif low in self.triggers:
+                fmt = self.f["function"]
+            elif low in self.redirects:
+                fmt = self.f["const"]
+            elif _FLAG.match(tok):
+                fmt = self.f["keyword_value"]
+            else:
+                continue
+            self.setFormat(t.start(), len(tok), fmt)
+
+
 class LineNumbers(QWidget):
     def __init__(self, editor: "CodeEdit"):
         super().__init__(editor)
@@ -263,6 +321,16 @@ class CodeEdit(QPlainTextEdit):
         self.completer.setWidget(self)
         self.completer.activated.connect(self._insert_completion)
         self.set_theme(theme)
+
+    comment_prefix = ";"       # o que Ctrl+; põe no começo da linha (# no ZSS)
+
+    def set_zss(self, on: bool) -> None:
+        """Arquivo ZSS: realce do ZSS e comentário com #."""
+        old = self.highlighter
+        self.highlighter = (ZssHighlighter if on else MugenHighlighter)(self.document(), self.theme)
+        old.setDocument(None)
+        old.deleteLater()
+        self.comment_prefix = "#" if on else ";"
 
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme

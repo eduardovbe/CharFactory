@@ -242,6 +242,13 @@ class Character:
         """Marca partes alteradas: 'sprites', 'anims', 'sounds', 'commands', 'states', 'def'."""
         self.dirty.update(what)
 
+    def save_sprites(self, path) -> None:
+        """Grava o SFF na versão em que ele veio: o v1 continua v1 (o WinMUGEN só lê v1, e os
+        PCX intocados saem byte a byte); vira v2 só se ganhou sprite truecolor, que o v1 não tem."""
+        s = self.sprites
+        v1 = s.version[0] == 1 and not any(x.is_truecolor for x in s.sprites)
+        s.save(path, version=1 if v1 else 2)
+
     def save(self, backup: bool = True) -> list[str]:
         written = []
 
@@ -256,7 +263,7 @@ class Character:
         if "def" in self.dirty:
             write(self.def_path, self.definition.save)
         if "sprites" in self.dirty:
-            write(self.path_of("sprite"), self.sprites.save)
+            write(self.path_of("sprite"), self.save_sprites)
         if "anims" in self.dirty:
             write(self.path_of("anim"), self.anims.save)
         if "sounds" in self.dirty:
@@ -309,7 +316,7 @@ class Character:
         if "def" in parts:
             write(self.def_path, self.definition.save)
         if "sprites" in parts:
-            write(self.path_of("sprite"), self.sprites.save)
+            write(self.path_of("sprite"), self.save_sprites)
         if "anims" in parts:
             write(self.path_of("anim"), self.anims.save)
         if "sounds" in parts:

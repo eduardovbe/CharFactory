@@ -282,7 +282,7 @@ class SpriteEditor(QWidget):
         split.addWidget(center)
         split.addWidget(self.right)
         split.setSizes([900, 290])
-        split.setChildrenCollapsible(False)
+        split.setCollapsible(0, False)     # o painel da direita fecha arrastando a divisa até a borda
         self.center = split
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)

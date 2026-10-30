@@ -537,6 +537,7 @@ class MainWindow(QMainWindow):
         self.act(v, tr("Command palette…"), self.command_palette, "F1", "command")
         self.act(v, tr("Show/hide bottom panel"), self.toggle_bottom, "Ctrl+J", "panel_hide")
         self.act(v, tr("Show/hide left panel"), lambda: self.left_tabs.setVisible(not self.left_tabs.isVisible()), "Ctrl+Alt+B")
+        self.act(v, tr("Show/hide right panel"), self.toggle_right, "Ctrl+Alt+N")
         v.addSeparator()
         sv = v.addMenu(icon("states"), tr("State tree"))
         view_group = QActionGroup(self)
@@ -752,8 +753,8 @@ class MainWindow(QMainWindow):
                 if key:
                     act.setShortcut(QKeySequence(key))
             # zoom ± sem botão (a roda do mouse já dá zoom): só o atalho
-            for keys, fn in [(["Ctrl+-"], lambda: cv.set_zoom(cv.zoom - 1)),
-                             (["Ctrl++", "Ctrl+="], lambda: cv.set_zoom(cv.zoom + 1))]:
+            for keys, fn in [(["Ctrl+-"], lambda: cv.zoom_step(-1)),
+                             (["Ctrl++", "Ctrl+="], lambda: cv.zoom_step(1))]:
                 act = QAction(self)
                 act.setShortcuts([QKeySequence(k) for k in keys])
                 act.triggered.connect(fn)
@@ -931,17 +932,18 @@ class MainWindow(QMainWindow):
         doc = ed.document()
         first, last = doc.findBlock(start).blockNumber(), doc.findBlock(end).blockNumber()
         blocks = [doc.findBlockByNumber(n) for n in range(first, last + 1)]
-        uncomment = all(b.text().lstrip().startswith(";") for b in blocks if b.text().strip())
+        mark = ed.comment_prefix                  # ; no CNS, # no ZSS
+        uncomment = all(b.text().lstrip().startswith(mark) for b in blocks if b.text().strip())
         c.beginEditBlock()
         for b in blocks:
             cur = QTextCursor(b)
             if uncomment:
-                idx = b.text().find(";")
+                idx = b.text().find(mark)
                 if idx >= 0:
                     cur.setPosition(b.position() + idx)
                     cur.deleteChar()
             else:
-                cur.insertText(";")
+                cur.insertText(mark)
         c.endEditBlock()
 
     def jump_issue(self, d: int) -> None:
@@ -1381,6 +1383,23 @@ class MainWindow(QMainWindow):
             box.setParent(None)
             box.hide()
         bar.update()
+
+    def toggle_right(self) -> None:
+        """Abre ou fecha o painel da direita do editor (explorador de sprites, paletas): mais
+        espaço para o canvas em telas pequenas."""
+        side = getattr(self.current_page(), "right", None)
+        if not isinstance(side, QWidget):
+            return
+        split = side.parentWidget()
+        if isinstance(split, QSplitter) and side.isVisible() and split.sizes()[split.indexOf(side)] == 0:
+            # recolhido arrastando a divisa: está "visível" com largura 0; volta numa largura útil
+            sizes = split.sizes()
+            want = max(side.minimumSizeHint().width(), 260)
+            k = split.indexOf(side)
+            sizes[k], sizes[0] = want, max(0, sizes[0] - want)
+            split.setSizes(sizes)
+            return
+        side.setVisible(not side.isVisible())
 
     def toggle_bottom(self) -> None:
         """Abre ou fecha o painel inferior (Ctrl+J), como nos IDEs."""

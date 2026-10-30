@@ -299,7 +299,10 @@ class _P:
             try:
                 number = -10 if num == "+1" else int(num)
             except ValueError:
-                number = None                       # const(...) do Ikemen: só o motor resolve
+                # const(StateDizzy): o número vem do common.const do Ikemen; sem ele, só o motor
+                cm = re.fullmatch(r"(?i)const\(\s*([\w.]+)\s*\)", num)
+                v = common_consts().get(cm.group(1).lower(), "") if cm else ""
+                number = int(v) if re.fullmatch(r"-?\d+", v) else None
             params = []
             for part in split_top(m[2], ";"):
                 if not part:
@@ -539,6 +542,7 @@ class _Lower:
         self.slot = 0
         self.depth = 0
         self.where = ""
+        self.loops: list[tuple[str, str]] = []     # portas (go, cont) dos laços abertos
 
     def new_slot(self) -> str:
         self.slot += 1
@@ -598,19 +602,26 @@ class _Lower:
                 self.emit("Null", [], [*conds, f"({self.sub(s.text, env, s.line)}) || 1"], ihp,
                           None, "", s.line, prefix)
             elif isinstance(s, Jump):
-                self.warn(tr("{0}, line {1}: {2} outside a simulated loop").format(self.where, s.line, s.kind))
+                if not self.loops:
+                    self.warn(tr("{0}, line {1}: {2} outside a loop").format(self.where, s.line, s.kind))
+                    continue
+                go, cont = self.loops[-1]
+                # break zera a porta do laço, continue a da volta: os controladores seguintes
+                # (que têm a porta nos gatilhos) já não rodam
+                self.emit("Null", [], [*conds, f"({go if s.kind == 'break' else cont} := 0) || 1"],
+                          ihp, None, "", s.line, prefix)
 
     MAX_UNROLL = 64
 
     def lower_loop(self, s: Loop, conds, ihp, pers, env, prefix):
-        """for com limites constantes vira o corpo repetido, com $i trocado pelo valor de cada
-        volta (como o Ikemen: de a até b inclusive, passo padrão 1). while, break/continue e
-        limites que dependem do jogo não são simulados (aviso)."""
+        """for com limites constantes (sem break/continue) vira o corpo repetido, com $i trocado
+        pelo valor de cada volta. O resto (while, limite que depende do jogo, break/continue)
+        vira voltas com porta: um local "ainda no laço" que cada volta reavalia, como o Ikemen
+        (bytecode.go: for avalia início, fim e passo uma vez; while reavalia a condição antes de
+        cada volta), até MAX_UNROLL voltas."""
         why = None
-        if s.kind != "for":
-            why = tr("while depends on the game on every turn")
-        elif any(isinstance(x, Jump) for x in _walk(s.body)):
-            why = "break/continue"
+        if s.kind != "for" or any(isinstance(x, Jump) for x in _walk(s.body)):
+            why = "gate"
         name, parts = None, split_top(s.header, ";")
         m = re.match(r"\s*\$?([A-Za-z_]\w*)\s*=(?!=)(.*)$", parts[0]) if parts else None
         if m:
@@ -621,7 +632,7 @@ class _Lower:
             for e in parts[:3]:
                 e = self.sub(e, env, s.line).strip()
                 if not re.fullmatch(r"[\d\s+\-*/().]+", e or "x"):
-                    why = tr("limit '{0}' depends on the game").format(e)
+                    why = "gate"            # limite que depende do jogo
                     break
                 nums.append(int(eval(e, {"__builtins__": {}})))
             if not why:
@@ -634,16 +645,56 @@ class _Lower:
                         break
                     v += step
                 if len(vals) > self.MAX_UNROLL:
-                    why = tr("more than {0} turns").format(self.MAX_UNROLL)
-        if why:
-            self.warn(tr("{0}, line {1}: loop {2} is not simulated ({3})").format(self.where, s.line, s.kind, why))
-            return
+                    why = "gate"
         ihp = ihp or s.ihp
         pers = s.pers if s.pers is not None else pers
+        if why:
+            self.gated_loop(s, name, parts, conds, ihp, pers, env, prefix)
+            return
         for v in vals:
             if name:
                 env[name.lower()] = str(v)
             self.block(s.body, conds, ihp, pers, env, prefix)
+
+    def gated_loop(self, s: Loop, name, parts, conds, ihp, pers, env, prefix):
+        """Voltas com porta: `go` diz se o laço continua (break zera), `cont` se a volta
+        continua (continue zera); cada controlador do corpo leva as duas nos gatilhos. Laço
+        dentro de laço tem menos voltas, para o CNS rebaixado não explodir."""
+        turns = self.MAX_UNROLL if not self.loops else (16 if len(self.loops) == 1 else 4)
+        go, cont = self.new_slot(), self.new_slot()
+        line = s.line
+        if s.kind == "for":
+            if name:
+                env[name.lower()] = self.new_slot()      # $i é um local de verdade aqui
+                i = env[name.lower()]
+            else:
+                i = self.new_slot()
+            exprs = [self.sub(e, env, line).strip() for e in parts[:3]] + ["1"] * (3 - len(parts[:3]))
+            end, step = self.new_slot(), self.new_slot()
+            self.setlocal(i, exprs[0], conds, ihp, line, prefix)
+            self.setlocal(end, exprs[1], conds, ihp, line, prefix)
+            self.setlocal(step, exprs[2] or "1", conds, ihp, line, prefix)
+
+            def in_range(v):
+                return f"ifelse({step} > 0, {v} <= {end}, ifelse({step} < 0, {v} >= {end}, 1))"
+            self.setlocal(go, in_range(i), conds, ihp, line, prefix)
+        else:
+            self.setlocal(go, "1", conds, ihp, line, prefix)
+        self.loops.append((go, cont))
+        for _ in range(turns):
+            if s.kind == "while":
+                self.setlocal(go, f"({self.sub(s.header, env, line)}) != 0", [*conds, go], ihp, line, prefix)
+            self.setlocal(cont, "1", [*conds, go], ihp, line, prefix)
+            self.block(s.body, [*conds, go, cont], ihp, pers, env, prefix)
+            if s.kind == "for":
+                # como o Ikemen: passo somado, fora do intervalo sai sem mudar a variável
+                self.setlocal(go, in_range(f"({i} + {step})"), [*conds, go], ihp, line, prefix)
+                self.setlocal(i, f"{i} + {step}", [*conds, go], ihp, line, prefix)
+        if s.kind == "while":
+            self.setlocal(go, f"({self.sub(s.header, env, line)}) != 0", [*conds, go], ihp, line, prefix)
+        # o laço ainda queria outra volta: o simulador avisa que cortou (antes cortava calado)
+        self.emit("ZssLoopCut", [("turns", str(turns))], [*conds, go], ihp, None, "", line, prefix)
+        self.loops.pop()
 
     def lower_if(self, s: If, conds, ihp, pers, env, prefix):
         ihp = ihp or s.ihp
@@ -775,18 +826,35 @@ def _known_words() -> set[str]:
     return words
 
 
+_COMMON: dict[str, str] | None = None
+
+
+def common_consts() -> dict[str, str]:
+    """data/common.const do Ikemen, que todo personagem herda (StateStand, FxDizzyEffect...):
+    a cópia que vem com o programa (tools/build_ikemen_params.py) e, por cima, a do Ikemen
+    configurado. Nome em minúsculas -> valor."""
+    global _COMMON
+    if _COMMON is None:
+        p = Path(__file__).resolve().parents[1] / "data" / "ikemen_params.json"
+        out = dict(json.loads(p.read_text("utf-8")).get("common_consts", {})) if p.exists() else {}
+        from .. import config
+        ik = config.load().get("ikemen")
+        common = Path(ik) / "data" / "common.const" if ik else None
+        if common and common.exists():
+            for line in common.read_text("utf-8", errors="replace").splitlines():
+                m = re.match(r"^\s*([\w.]+)\s*=\s*([^;]*)", line)
+                if m:
+                    out[m.group(1).lower()] = m.group(2).strip()
+        _COMMON = out
+    return _COMMON
+
+
 def _ikemen_consts() -> set[str]:
-    """Constantes do motor (const(...) do compilador) e as de data/common.const do Ikemen
-    configurado, que todo personagem herda (StateStand, AnimCrouchHit_hard...)."""
+    """Constantes do motor (const(...) do compilador) e as do common.const, que todo
+    personagem herda (StateStand, AnimCrouchHit_hard...)."""
     p = Path(__file__).resolve().parents[1] / "data" / "ikemen_params.json"
     out = set(json.loads(p.read_text("utf-8")).get("consts", [])) if p.exists() else set()
-    from .. import config
-    ik = config.load().get("ikemen")
-    common = Path(ik) / "data" / "common.const" if ik else None
-    if common and common.exists():
-        text = common.read_text("utf-8", errors="replace")
-        out |= {k.lower() for k in re.findall(r"(?m)^\s*([\w.]+)\s*=", text)}
-    return out
+    return out | set(common_consts())
 
 
 def _bad_identifiers(expr: str, words: set[str]) -> list[str]:
@@ -923,6 +991,10 @@ class ZssStates:
 
     def __init__(self, text: str, path=None, funcs: dict | None = None):
         from pathlib import Path
+        # o texto fica com \n; ao gravar volta o fim de linha e a codificação do arquivo
+        self.newline = "\r\n" if "\r\n" in text else "\n"
+        self.encoding = "utf-8"
+        text = text.replace("\r\n", "\n")
         self.text = text
         self.path = Path(path) if path else None
         self.funcs = funcs if funcs is not None else {}
@@ -956,7 +1028,13 @@ class ZssStates:
         return s.line if s else None
 
     # ---- edição
+    def set_text(self, text: str) -> None:
+        """Troca o arquivo inteiro (aba do editor); erro de sintaxe levanta ZssError e não muda nada."""
+        self._set_text(text)
+
     def _set_text(self, text: str) -> None:
+        # por dentro é sempre \n: CRLF que chega aqui viraria \r\r\n ao gravar um arquivo CRLF
+        text = text.replace("\r\n", "\n")
         parse(text)                      # erro de sintaxe não estraga o arquivo
         self.text = text
         self._build()
@@ -1013,9 +1091,15 @@ class ZssStates:
 
     def save(self, path=None) -> None:
         from pathlib import Path
-        Path(path or self.path).write_text(self.text, "utf-8")
+        # write_bytes: write_text no Windows trocava \n por \r\n e o arquivo inteiro mudava
+        text = self.text.replace("\n", self.newline) if self.newline != "\n" else self.text
+        Path(path or self.path).write_bytes(text.encode(
+            self.encoding, errors="mugen8" if self.encoding == "cp1252" else "strict"))
 
 
 def load(path, funcs: dict | None = None) -> ZssStates:
     from pathlib import Path
-    return ZssStates(Path(path).read_text("utf-8", errors="replace"), path, funcs)
+    text, enc = mtext.read_text(path)              # UTF-8, ou cp1252 sem perder bytes
+    z = ZssStates(text, path, funcs)
+    z.encoding = enc
+    return z

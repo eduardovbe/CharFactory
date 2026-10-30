@@ -37,3 +37,13 @@ def all_sffs():
     found = {*MUGEN.glob("data/*.sff"), *(MUGEN / "chars" / "kfm").glob("*.sff"),
              *MUGEN.glob("stages/stage0*.sff"), *MUGEN.glob("stages/kfm*.sff"), *MUGEN.glob("font/*.sff")}
     return sorted(found)
+
+
+def dispose_window(win) -> None:
+    """Fecha e destrói a janela do teste. Só fechar deixava a janela viva (77 widgets): com 50
+    testes seguidos, cada setStyleSheet repintava todas as janelas antigas, o teste ficava
+    mais lento a cada um e a suíte acabava sem memória."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    win.close()
+    win.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

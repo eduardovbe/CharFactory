@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QHeaderView, QLab
 
 from ... import sctrldocs, validate as vmod
 from ...project import ProjectError
-from ...formats import air, cmd, cns, mtext
+from ...formats import air, cmd, cns, mtext, zssread
 from ...tools import generate, ops
 from ..context import AppContext
 from ..animpreview import AnimPreview
@@ -431,7 +431,9 @@ class CodePage(QWidget):
             except Exception:  # noqa: BLE001
                 return []
         if self.kind == "states":
-            return [{"kind": "states", "index": i, "path": st.path, "text": (lambda st=st: st.doc.to_text())}
+            # ZSS: a aba mostra o .zss (st.doc é o CNS rebaixado, só para simular e validar)
+            return [{"kind": "states", "index": i, "path": st.path, "zss": isinstance(st, zssread.ZssStates),
+                     "text": (lambda st=st: st.text if isinstance(st, zssread.ZssStates) else st.doc.to_text())}
                     for i, st in enumerate(c.states)]
         if self.kind == "air":
             return [{"kind": "air", "path": c.path_of("anim"), "text": lambda: c.anims.to_text()}]
@@ -463,6 +465,8 @@ class CodePage(QWidget):
             return
         for src in self._sources():
             ed = CodeEdit(self.ctx.theme)
+            if src.get("zss"):
+                ed.set_zss(True)
             ed.setPlainText(src["text"]().replace("\r\n", "\n"))
             ed.document().setModified(False)
             ed.document().modificationChanged.connect(self._titles)
@@ -555,16 +559,55 @@ class CodePage(QWidget):
         self._line_items.sort(key=lambda x: x[0])
         self.sync_to_cursor()
 
+    def _zss_tree(self, f):
+        """(doc, estados, linha de cada seção) de uma aba ZSS: os estados rebaixados, com a
+        linha do .zss (o rótulo de cada controlador rebaixado termina em @linha)."""
+        try:
+            z = zssread.ZssStates(f["edit"].toPlainText(), f["path"],
+                                  dict(self.char.zss_functions) if self.char else None)
+        except zssread.ZssError as e:
+            self._item(self.tree, tr("ZSS syntax error: {0}").format(e), e.line)
+            return None
+        line_of = {}
+        for n, sd in z.statedefs.items():
+            top = z.zss_line(n) or 1
+            line_of[id(sd.section)] = top
+            # só o que está escrito no arquivo, uma vez: as voltas desenroladas de um laço e os
+            # locais internos do rebaixamento (VarSet de zsslocal, Null de :=, marcador de corte) saem
+            seen, keep = set(), []
+            for ctl in sd.controllers:
+                m = re.search(r"@(\d+)\s*$", ctl.label or "")
+                ln = int(m.group(1)) if m else top
+                typ = (ctl.type or "").lower()
+                keys = [k.lower() for k in ctl.section.as_dict() if k.lower() not in ("type", "triggerall", "trigger1")]
+                if typ == "zssloopcut" or (typ == "varset" and keys and all(k.startswith("zsslocal") for k in keys)) \
+                        or (typ == "null" and any(":=" in t for ts in ctl.triggers().values() for t in ts)) \
+                        or (typ, ln) in seen:
+                    continue
+                seen.add((typ, ln))
+                keep.append(ctl)
+                line_of[id(ctl.section)] = ln
+            sd.controllers[:] = keep
+        return z.doc, z, line_of
+
     def _build_tree(self, f) -> None:
-        doc = mtext.parse(f["edit"].toPlainText())
-        line = 1 + len(doc.preamble)
-        positions = []
-        for sec in doc.sections:
-            positions.append((sec, line))
-            line += len(sec.lines)
-        line_of = {id(s): ln for s, ln in positions}
+        if f.get("zss"):
+            got = self._zss_tree(f)
+            if got is None:
+                return
+            doc, st, line_of = got
+            positions = []
+        else:
+            doc = mtext.parse(f["edit"].toPlainText())
+            line = 1 + len(doc.preamble)
+            positions = []
+            for sec in doc.sections:
+                positions.append((sec, line))
+                line += len(sec.lines)
+            line_of = {id(s): ln for s, ln in positions}
         if self.kind == "states":
-            st = cns.States(doc)
+            if not f.get("zss"):
+                st = cns.States(doc)
             consts = [(s, ln) for s, ln in positions if s.kind not in ("state", "statedef")]
             if consts:
                 grp = self._group("const", tr("Constants"), "grp_const", tr("Character data sections ([Data], [Size], [Velocity]…)"), len(consts), default_open=False)
@@ -664,7 +707,7 @@ class CodePage(QWidget):
                          f"({MOVETYPE_NAMES.get(mt, '?')}) · physics {(sec.get('physics') or '?').strip()}\n"
                          f"anim {anim if anim is not None else '—'} · {len(sd.controllers)} controllers")
         for ctl in sd.controllers:
-            label = (ctl.label or "").strip()
+            label = re.sub(r"\s*@\d+$", "", (ctl.label or "").strip())    # @linha do ZSS rebaixado
             show = ctl.type or "?"
             if label and not label.isdigit() and label.lower() != show.lower():
                 show += f"  ·  {label}"
@@ -839,6 +882,9 @@ class CodePage(QWidget):
         ed = self.current_edit()
         if not ed:
             return
+        f = self.current()
+        if f and f.get("zss"):      # trecho, controller da janela ou lista de vars: tudo vem em CNS
+            text = self._snippet_as_zss(text, self._current_statedef() or 1000)
         c = ed.textCursor()
         c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
         c.insertText("\n\n" + text.rstrip() + "\n")
@@ -878,6 +924,19 @@ class CodePage(QWidget):
         except (KeyError, IndexError, ValueError):
             text = text.replace("{n}", str(n)).replace("{name}", name).replace("{nome}", name)
         self._insert(text)
+
+    @staticmethod
+    def _snippet_as_zss(text: str, n: int) -> str:
+        """Trecho em CNS numa aba ZSS: vira ZSS (antes entrava CNS e o Aplicar dava erro de
+        sintaxe). Comentário ; vira #; [State] soltos entram como controladores."""
+        from ...formats import zss
+        if re.search(r"(?im)^\s*\[statedef\s", text):
+            return zss.cns_to_zss(text, labels=True).text.strip()
+        if re.search(r"(?im)^\s*\[state\s", text):
+            out = zss.cns_to_zss(f"[Statedef {n}]\n\n{text}", labels=True).text
+            body = out.split("[StateDef", 1)[-1]
+            return body.split("\n", 1)[1].strip() if "\n" in body else ""
+        return re.sub(r"(?m)^(\s*);", r"\1#", text)
 
     def new_snippet(self) -> None:
         from PySide6.QtWidgets import QInputDialog
@@ -991,7 +1050,15 @@ class CodePage(QWidget):
             elif f["kind"] == "states":
                 if f["index"] >= len(c.states):
                     raise ProjectError(tr("the .def no longer lists {0} in [Files]").format(f['path'].name))
-                c.states[f["index"]] = cns.States(parse(c.states[f["index"]].doc), f["path"])
+                old = c.states[f["index"]]
+                if isinstance(old, zssread.ZssStates):
+                    # continua ZSS: antes virava cns.States e o Ctrl+S gravava CNS dentro do .zss
+                    try:
+                        old.set_text(text)
+                    except zssread.ZssError as e:
+                        raise ProjectError(tr("ZSS syntax error: {0}").format(e)) from e
+                else:
+                    c.states[f["index"]] = cns.States(parse(old.doc), f["path"])
                 self.ctx.reset_cache("constants")
                 self.ctx.changed("states")
             elif f["kind"] == "air":
@@ -1019,6 +1086,7 @@ class CodePage(QWidget):
                 head = _SPACES.sub(" ", h[1].strip().lower())
                 index.setdefault(head, n)
                 index.setdefault(head.split(",")[0].strip(), n)
+                index.setdefault(head.split(";")[0].strip(), n)     # ZSS: [StateDef 200; type: S; …]
         return index
 
     @staticmethod

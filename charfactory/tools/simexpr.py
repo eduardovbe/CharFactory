@@ -33,10 +33,13 @@ TOKEN = re.compile(r"""
 
 # gatilhos seguidos de um eixo (x/y/z)
 AXIS = {"pos", "vel", "p2dist", "p2bodydist", "p1dist", "screenpos", "rootdist", "parentdist",
-        "p2pos", "hitvel", "gethitvar"}
+        "p2pos", "hitvel", "gethitvar", "camerapos"}
 REDIRECT = {"enemynear", "enemy", "root", "parent", "helper", "target", "p2", "partner",
             "playerid", "player"}
 LETTERS = {"statetype", "movetype", "p2statetype", "p2movetype", "physics"}
+# comparados com uma palavra ou um texto: teammode = single, name = "Kung Fu Man"
+WORDS = {"teammode", "name", "p1name", "p2name", "p3name", "p4name", "authorname", "displayname",
+         "gamemode", "stagevar"}
 ASSIGNABLE = {"var", "fvar", "sysvar", "sysfvar", "zsslocal"}
 FUNCS = {"ifelse", "cond", "cos", "sin", "tan", "acos", "asin", "atan", "abs", "floor", "ceil",
          "exp", "ln", "log", "min", "max", "sign", "clamp", "sqrt", "var", "fvar", "sysvar",
@@ -222,6 +225,9 @@ class Parser:
             op = self.take()[1]
             s = self.take()[1].strip('"')
             return ("command", op, s)
+        if name in WORDS and name != "stagevar" and self.peek()[1] in ("=", "!="):
+            op = self.take()[1]
+            return ("word", name, op, self.take()[1].strip('"').lower())
         if name == "const" and self.peek()[1] == "(":
             self.take("(")
             parts = []
@@ -361,6 +367,9 @@ def _ev(n, ctx):
         return _b(d != 0 and ctx.trigger("time", None) % d == r)
     if k == "letter":
         v = ctx.trigger(n[1], None)
+        return _b((v == n[3]) == (n[2] == "="))
+    if k == "word":
+        v = str(ctx.trigger(n[1], None)).lower()
         return _b((v == n[3]) == (n[2] == "="))
     if k == "command":
         v = ctx.command(n[2])
