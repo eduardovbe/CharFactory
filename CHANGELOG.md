@@ -7,32 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-30
+
 ### Added
 
-- Simulator: advantage on hit and on guard side by side, blockstun and cancel windows.
-- Zoom below 1x for giant sprites, centered on the mouse.
-- Timeline: arrows go to the previous/next frame and the timing can be locked.
-- View › Show/hide right panel (Ctrl+Alt+N); the side panel also collapses by dragging.
-- ZSS: `while`, `break`, `continue` and loops with game limits now run in the simulator.
-- Ikemen GO 1.0 data updated, with `common.const` built in.
+- Simulator shows the advantage on hit and on guard, with blockstun and cancel windows.
+- Zoom out for giant sprites, centered on the mouse.
+- Timeline: arrow keys move between frames and the timing can be locked.
+- Show or hide the right panel (Ctrl+Alt+N).
+- ZSS loops run in the simulator.
+- Updated for Ikemen GO 1.0.
 
 ### Fixed
 
-- The simulator no longer hangs on moves that loop ChangeState a few times in the same tick.
-- Effects and helpers that wait on `pi`, `ParentVarAdd`, `VarRangeSet` or the camera now end in the simulator.
-- A parry with ReversalDef no longer repeats forever in the simulator.
+- The simulator no longer hangs on moves that loop through states in the same tick.
+- Effects and helpers that never ended in the simulator now end.
 - Clicking a frame on the timeline selects it without changing its time.
-- ZSS files show as ZSS in the States editor, with their own highlighting, and save as ZSS.
-- Moves from a ZSS `[StateDef -1]` show up as moves in the simulator.
-- Ikemen constants like `const(StateStand)` are no longer flagged as errors without Ikemen installed.
-- `PlayerID`, `TeamMode` and `Name` triggers work in the simulator.
-- Saving no longer damages Japanese (Shift-JIS) text or changes the line endings of ZSS files.
-- SFF v1 stays v1 when saved, keeps its shared palettes and keeps palette edits.
-- Truncated PCX sprites load again and no longer block saving.
-- Snippets and controllers inserted in a ZSS tab come in as ZSS.
-- The effect check no longer fails when the hit lands on the last tick.
-- Damaged sprites show as blank instead of breaking the editor.
-- The command line prints a short error instead of a traceback.
+- ZSS files open, show and save as ZSS.
+- Ikemen constants are no longer flagged as errors.
+- Saving no longer damages Japanese text or SFF v1 palettes.
+- Damaged or truncated sprites no longer break the editor or block saving.
+- The command line shows short errors instead of a traceback.
 
 ## [0.4.0] - 2026-10-26
 
@@ -273,7 +268,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/eduardovbe/CharFactory/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/eduardovbe/CharFactory/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/eduardovbe/CharFactory/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/eduardovbe/CharFactory/compare/v0.2.0...v0.2.5
