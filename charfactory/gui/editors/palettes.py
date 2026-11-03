@@ -2,7 +2,6 @@
 de cor, variante por matiz/saturação/brilho e as 12 paletas por faixas de cor, numa janela só."""
 from __future__ import annotations
 
-import os
 import random
 from pathlib import Path
 
@@ -287,6 +286,7 @@ class PaletteEditor(QWidget):
         self.tabs.addTab(self._colors_tab(), tr("Colors"))
         self.tabs.addTab(self._new_tab(), tr("New palette"))
         self.tabs.addTab(self._set_tab(), tr("12 palettes"))
+        self.tabs.addTab(self._other_tab(), tr("Other palette"))
         self.tabs.currentChanged.connect(lambda _: (self._load_adjust(), self.show_preview()))
 
         split = QSplitter()
@@ -346,7 +346,8 @@ class PaletteEditor(QWidget):
                 (tr("Move selection → (with remap)"), lambda: self.shift(1)),
                 (tr("Optimize (clear unused colors)"), self.optimize)]),
             (tr("Files"), [
-                (tr("Import palette (.act or image)…"), self.import_act), (tr("Export .act…"), self.export_act),
+                (tr("Open palette (.act or image) to copy colors…"), lambda: self.open_other()),
+                (tr("Export .act…"), self.export_act),
                 (tr("Generate images of all palettes…"), self.gen_images),
                 (tr("Fit an image to this palette…"), self.adapt_image)]),
         ]
@@ -364,6 +365,169 @@ class PaletteEditor(QWidget):
                                   "on the whole palette. Ctrl+Z undoes each one.")))
         v.addStretch()
         return self._scroll(w)
+
+    TAB_OTHER = 3
+
+    def _other_tab(self) -> QWidget:
+        """Outra paleta ao lado da atual, como o editor avançado do FFS: abre um .act, uma
+        imagem ou outra paleta do personagem sem trocar nada, e passa cores de uma para a outra.
+        Antes, importar substituía a paleta atual inteira."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        self.other_grid = PaletteGrid()
+        self.other_grid.setMinimumSize(160, 160)
+        self.other_grid.setToolTip(tr("Click picks a color, Shift+click marks a range"))
+        self.other_title = QLabel(tr("Nothing open yet"))
+        self.other_title.setObjectName("dim")
+        self.other_title.setWordWrap(True)
+        self.other_from = QComboBox()
+        self.other_from.setToolTip(tr("Another palette of this character"))
+        self.other_from.activated.connect(self._other_from_char)
+        open_btn = QPushButton(icon("open"), tr("Open .act or image…"))
+        open_btn.clicked.connect(self.open_other)
+        src = QHBoxLayout()
+        src.addWidget(open_btn)
+        src.addWidget(self.other_from, 1)
+        v.addLayout(src)
+        v.addWidget(self.other_title)
+        v.addWidget(self.other_grid, 1)
+        moves = QGridLayout()
+        for k, (text, tip, fn) in enumerate((
+                (tr("← Copy colors"), tr("Selected colors of the other palette go into the current one, starting "
+                                         "at the color selected in the main grid"), self.other_to_current),
+                (tr("Copy colors →"), tr("Selected colors of the current palette go into the other one, starting "
+                                         "at the color selected there"), self.current_to_other),
+                (tr("Same selection"), tr("Selects the same indices in the other palette"), self.other_same_selection),
+                (tr("Add the missing colors"), tr("Adds to the current palette the colors of the other one that it "
+                                                  "does not have yet"), self.other_add_missing))):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            moves.addWidget(b, k // 2, k % 2)
+            setattr(self, ("other_btn_to_current", "other_btn_to_other", "other_btn_same",
+                           "other_btn_add")[k], b)
+        v.addLayout(moves)
+        self.other_btn_all = QPushButton(tr("Use the whole palette (replace the current one)"))
+        self.other_btn_all.clicked.connect(self.other_use_all)
+        v.addWidget(self.other_btn_all)
+        v.addWidget(hint_label(tr("Changes to the current palette go into Ctrl+Z. The other palette is only a "
+                                  "workspace: it is not saved in the character.")))
+        self._other_enable()
+        return self._scroll(w)
+
+    def _other_enable(self) -> None:
+        on = bool(self.other_grid.colors)
+        for b in (self.other_btn_to_current, self.other_btn_to_other, self.other_btn_same,
+                  self.other_btn_add, self.other_btn_all):
+            b.setEnabled(on)
+
+    def _fill_other_from(self) -> None:
+        """Lista as paletas do personagem para abrir uma delas como a outra paleta."""
+        self.other_from.blockSignals(True)
+        self.other_from.clear()
+        self.other_from.addItem(tr("Character palette…"), None)
+        for pal in self.char_palettes():
+            self.other_from.addItem(_swatch(pal.colors), tr("Palette {0}").format(pal.item), pal.item)
+        self.other_from.blockSignals(False)
+
+    def _set_other(self, colors, title: str) -> None:
+        self.other_grid.set_colors([tuple(c[:3]) for c in colors][:256])
+        self.other_grid.select(0)
+        self.other_title.setText(title)
+        self._other_enable()
+        self.tabs.setCurrentIndex(self.TAB_OTHER)
+
+    def open_other(self, path: str | None = None) -> None:
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, tr("Open palette"), "",
+                tr("Palette or image with a palette (*.act *.png *.pcx *.gif *.bmp);;ACT palette (*.act)"))
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".act"):
+                from ...formats import act
+                cols = act.load(path)
+            else:
+                from ...tools import spriteimport as SI
+                cols = SI.palette_from_image(path)
+        except (OSError, ValueError) as e:
+            self.ctx.status.emit(tr("Could not read the palette: {0}").format(e))
+            return
+        self._set_other(cols, Path(path).name)
+
+    def _other_from_char(self, i: int) -> None:
+        slot = self.other_from.itemData(i)
+        if slot is None:
+            return
+        p = self.char.sprites.palettes[self.char.sprites.find_palette(1, slot)]
+        self._set_other(p.colors, tr("Palette {0} of the character").format(slot))
+        self.other_from.setCurrentIndex(0)
+
+    def _other_sel(self) -> list[int]:
+        a, b = sorted(self.other_grid.sel)
+        return list(range(a, min(b, len(self.other_grid.colors) - 1) + 1))
+
+    def other_to_current(self) -> None:
+        """Cores selecionadas da outra paleta entram na atual a partir da cor escolhida na grade."""
+        if self.current_palette() is None:
+            return
+        src = [self.other_grid.colors[i] for i in self._other_sel()]
+        start = sorted(self.grid.sel)[0]
+        src = src[:256 - start]
+        if not src:
+            return
+        edit.set_palette_colors(self.char, self._slot, {str(start + k): list(c) for k, c in enumerate(src)})
+        self.grid.sel = (start, start + len(src) - 1)
+        self.ctx.status.emit(tr("{0} color(s) copied to index {1}").format(len(src), start))
+        self._done()
+
+    def current_to_other(self) -> None:
+        p = self.current_palette()
+        if p is None or not self.other_grid.colors:
+            return
+        src = [tuple(p.colors[i][:3]) for i in self.selection() if i < len(p.colors)]
+        start = sorted(self.other_grid.sel)[0]
+        cols = list(self.other_grid.colors)
+        for k, c in enumerate(src[:256 - start]):
+            while len(cols) <= start + k:
+                cols.append((0, 0, 0))
+            cols[start + k] = c
+        self.other_grid.set_colors(cols)
+        self.other_grid.select(start, start + max(0, len(src) - 1))
+
+    def other_same_selection(self) -> None:
+        a, b = sorted(self.grid.sel)
+        self.other_grid.select(a, b)
+
+    def other_add_missing(self) -> None:
+        """Cores da outra paleta que a atual não tem entram no fim dela (até 256)."""
+        p = self.current_palette()
+        if p is None:
+            return
+        have = {tuple(c[:3]) for c in p.colors}
+        new = []
+        for c in self.other_grid.colors[1:]:           # o índice 0 é a transparência
+            if tuple(c) not in have and tuple(c) not in new:
+                new.append(tuple(c))
+        new = new[:256 - len(p.colors)]
+        if not new:
+            self.ctx.status.emit(tr("The current palette already has every color, or is full"))
+            return
+        start = len(p.colors)
+        edit.set_palette_colors(self.char, self._slot, {str(start + k): list(c) for k, c in enumerate(new)})
+        self.ctx.status.emit(tr("{0} color(s) added").format(len(new)))
+        self._done()
+
+    def other_use_all(self) -> None:
+        """A outra paleta inteira no lugar da atual (o que o Importar fazia direto antes)."""
+        p = self.current_palette()
+        if p is None or not self.other_grid.colors:
+            return
+        cols = self.other_grid.colors[:max(len(p.colors), len(self.other_grid.colors))][:256]
+        edit.set_palette_colors(self.char, self._slot, {str(i): list(c) for i, c in enumerate(cols)})
+        self.ctx.status.emit(tr("Current palette replaced by the other one"))
+        self._done()
 
     def _effects_box(self) -> QGroupBox:
         """Efeitos de cor, em duas linhas: uma cor vira outra (só os
@@ -660,6 +824,7 @@ class PaletteEditor(QWidget):
                 self.poses = []
             self._load_bands()
         existing = sorted(p.item for p in self.char_palettes())
+        self._fill_other_from()
         if self._want_slot is not None:
             self._slot, self._want_slot = self._want_slot, None
         if self.current_palette() is None:       # apagada (ou nunca escolhida): a primeira 1,x
@@ -1385,38 +1550,6 @@ class PaletteEditor(QWidget):
         out.putpalette(flat + [0] * (768 - len(flat)))
         out.save(dst, transparency=0)
         self.ctx.status.emit(tr("Fitted image saved to {0}").format(dst))
-
-    def import_act(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("Import palette"), "",
-            tr("Palette or image with a palette (*.act *.png *.pcx *.gif *.bmp);;ACT palette (*.act)"))
-        if path and not path.lower().endswith(".act"):
-            # a paleta embutida da imagem (PNG/PCX/GIF indexado), índice por índice
-            from ...tools import spriteimport as SI
-            try:
-                cols = SI.palette_from_image(path)
-            except (OSError, ValueError) as e:
-                return self.ctx.status.emit(tr("Could not read the image: {0}").format(e))
-            if self.is_own():
-                cols = cols[:len(self.current_palette().colors)]
-                edit.set_palette_colors(self.char, self._slot, {str(i): list(c) for i, c in enumerate(cols)})
-            else:                                # o mesmo caminho do .act (cria a 1,N se faltar)
-                import tempfile
-                from ...formats import act
-                tmp = Path(tempfile.gettempdir()) / f"charfactory_pal_{os.getpid()}.act"
-                act.save((cols + [(0, 0, 0)] * 256)[:256], tmp)
-                ops.import_palette(self.char, self._slot, tmp)
-                tmp.unlink(missing_ok=True)
-            self.ctx.status.emit(tr("{0} colors taken from the image palette").format(len(cols)))
-            return self._done()
-        if path:
-            if self.is_own():                    # paleta própria: as cores do .act entram nela
-                from ...formats import act
-                cols = act.load(path)[:len(self.current_palette().colors)]
-                edit.set_palette_colors(self.char, self._slot, {str(i): list(c) for i, c in enumerate(cols)})
-            else:
-                ops.import_palette(self.char, self._slot, path)
-            self._done()
 
     def export_act(self) -> None:
         name = "pal{0}-{1}".format(*self._slot) if self.is_own() else f"pal{self._slot}"

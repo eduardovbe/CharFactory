@@ -74,7 +74,7 @@ def test_no_portuguese_left_outside_tr():
     a exceção é o mapa que migra os nomes antigos dos temas."""
     accent = re.compile(r"[áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ]")
     allowed = {"Escuro", "Claro", "Meia-noite", "Esmeralda", "Clássico", "Alto contraste", "Português (Brasil)",
-               "Español"}
+               "Español", "Français"}
     found = []
     for p in (ROOT / "charfactory").rglob("*.py"):
         if "__pycache__" in p.parts:

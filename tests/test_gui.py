@@ -169,6 +169,41 @@ def test_sprite_axis_and_palette_variant(gui):
     assert ctx.char.sprites.find_palette(1, 9) >= 0
 
 
+def test_other_palette_moves_colors_without_replacing(gui, tmp_path):
+    """Abrir uma paleta (imagem ou .act) não substitui mais a atual: ela vai para a aba Outra
+    paleta, e as cores passam de uma para a outra como no editor avançado do FFS."""
+    from PIL import Image
+    from charfactory.gui.editors.palettes import PaletteEditor
+    app, ctx, win, _ = gui
+    img = Image.new("P", (8, 8))
+    img.putpalette([c for i in range(256) for c in (i, 255 - i, 7)])
+    img.save(tmp_path / "src.png")
+    ed = PaletteEditor(ctx)
+    ed.load()
+    ed.select_slot(1)
+    before = list(ed.current_palette().colors)
+    ed.open_other(str(tmp_path / "src.png"))
+    assert ed.tabs.currentIndex() == ed.TAB_OTHER and len(ed.other_grid.colors) == 256
+    assert ed.current_palette().colors == before                       # abrir não troca nada
+    ed.other_grid.select(10, 12)
+    ed.grid.select(5)
+    ed.other_to_current()
+    cols = ed.current_palette().colors
+    assert [tuple(c[:3]) for c in cols[5:8]] == [(10, 245, 7), (11, 244, 7), (12, 243, 7)]
+    assert cols[:5] == before[:5] and cols[8:] == before[8:]
+    ed.undo()
+    assert ed.current_palette().colors == before
+    ed.grid.select(1, 2)
+    ed.other_grid.select(40)
+    ed.current_to_other()
+    assert ed.other_grid.colors[40:42] == [tuple(c[:3]) for c in before[1:3]]
+    ed.grid.select(3, 6)
+    ed.other_same_selection()
+    assert sorted(ed.other_grid.sel) == [3, 6]
+    ed.other_from.activated.emit(2)                                     # outra paleta do próprio char
+    assert ed.other_grid.colors and ed.current_palette().colors == before
+
+
 def test_palette_changes_show_live(gui, monkeypatch):
     from PySide6.QtGui import QColor
     from PySide6.QtWidgets import QColorDialog
@@ -1897,6 +1932,118 @@ def test_current_frame_section_selects_without_touching_timing(gui):
     assert sc.widget().minimumSizeHint().width() <= sc.viewport().width()
 
 
+def test_animation_panel_order_onion_toggle_and_narrow_toolbar(gui):
+    """Animação no topo, depois Frame atual (slider, grupo/índice, tempo, loop) e Posição
+    (offset, flip). Onion skin começa desligado, liga pelo botão da barra de cima (que segue a
+    caixa da seção) e tem opacidade. Com 1366 px a barra de ferramentas inteira continua à vista."""
+    from charfactory.gui.widgets import Section
+    app, ctx, win, _ = gui
+    win.resize(1366, 768)
+    win.show_page(win.anims)
+    app.processEvents()
+    an = win.anims
+    body = an.left.scroll.widget()
+    secs = sorted((s for s in body.findChildren(Section) if s.parentWidget() is body), key=lambda s: s.y())
+    assert secs[0] is an.act_sec and secs[1] is an.frame_sec
+    pos = secs[2]
+    assert pos.isAncestorOf(an.offset) and pos.isAncestorOf(an.flip) and not an.frame_sec.isAncestorOf(an.offset)
+    assert an.frame_sec.isAncestorOf(an.gi) and an.frame_sec.isAncestorOf(an.loop) and an.frame_sec.isAncestorOf(an.frame_nav)
+    assert not an.onion.isChecked() and an.canvas.onion is None
+    an.onion_action.setChecked(True)
+    app.processEvents()
+    assert an.onion.isChecked() and ctx.settings["onion_on"] is True
+    an.onion.setChecked(False)
+    assert not an.onion_action.isChecked()
+    an.onion_opacity.setValue(60)
+    assert an.canvas.onion_opacity == 0.6
+    ex = win.extra
+    acts = [a for a in ex.actions() if not a.isSeparator()]
+    assert acts and all(ex.widgetForAction(a).isVisible() for a in acts)
+
+
+def test_auto_boxes_on_all_frames_and_new_animation_dialog(gui, monkeypatch):
+    """Caixas automáticas em todos os frames de uma vez (tipo e formato, Ctrl+Z desfaz) e a
+    janela de nova animação: faixa de um grupo, tempo, nome e caixas já na criação."""
+    from charfactory.gui import animdialogs
+    app, ctx, win, _ = gui
+    win.show_page(win.anims)
+    app.processEvents()
+    an = win.anims
+    an.select_action(200)
+    a = an.action()
+    clsn2 = [list(f.clsn2) for f in a.frames]
+
+    def damage_rect(self):
+        self.opts.kind.setCurrentIndex(self.opts.kind.findData("damage"))
+        self.opts.shape.setCurrentIndex(self.opts.shape.findData("rect"))
+        return 1
+    monkeypatch.setattr(animdialogs.AutoBoxesDialog, "exec", damage_rect)
+    an.auto_boxes_all()
+    a = an.action()
+    assert all(len(f.clsn1) == 1 for f in a.frames) and [list(f.clsn2) for f in a.frames] == clsn2
+    assert ctx.undo()
+    items = sorted(ctx.char.sprites.groups()[200])
+
+    def make(self):
+        self.group.setCurrentIndex(self.group.findData(200))
+        self.first.setValue(items[0])
+        self.last.setValue(items[1])
+        self.time.setValue(6)
+        self.name.setText("Soco teste")
+        self.boxes.kind.setCurrentIndex(self.boxes.kind.findData("both"))
+        self.boxes.shape.setCurrentIndex(self.boxes.shape.findData("rect"))
+        return 1
+    monkeypatch.setattr(animdialogs.NewAnimationDialog, "exec", make)
+    before = set(ctx.char.anims.numbers())
+    an.new_action()
+    app.processEvents()
+    (n,) = set(ctx.char.anims.numbers()) - before
+    act = ctx.char.anims.get(n)
+    assert [(f.group, f.item, f.time) for f in act.frames] == [(200, items[0], 6), (200, items[1], 6)]
+    assert all(len(f.clsn1) == 1 and len(f.clsn2) == 1 for f in act.frames)
+    assert ctx.char.anims.name_of(n) == "Soco teste"
+
+
+def test_new_animation_without_a_sprite_group(gui, monkeypatch):
+    """O grupo de sprites é opcional: a janela abre em "Nenhum", com a faixa e as caixas
+    desativadas, e cria a animação com um frame vazio (-1,0). Vindo do explorador de sprites,
+    ela já abre no grupo escolhido."""
+    from charfactory.gui import animdialogs
+    app, ctx, win, _ = gui
+    win.show_page(win.anims)
+    app.processEvents()
+    an = win.anims
+    an.select_action(200)
+    seen = {}
+
+    def accept_default(self):
+        seen["state"] = (self.group.currentData(), self.first.isEnabled(), self.last.isEnabled(),
+                         self.boxes.isEnabled(), self.time.isEnabled(),
+                         self.bb.button(animdialogs.QDialogButtonBox.StandardButton.Ok).isEnabled())
+        self.time.setValue(-1)
+        self.group.setCurrentIndex(self.group.findData(200))
+        seen["with_group"] = (self.first.isEnabled(), self.boxes.isEnabled())
+        self.group.setCurrentIndex(0)
+        return 1
+    monkeypatch.setattr(animdialogs.NewAnimationDialog, "exec", accept_default)
+    before = set(ctx.char.anims.numbers())
+    an.new_action()
+    app.processEvents()
+    assert seen["state"] == (None, False, False, False, True, True)
+    assert seen["with_group"] == (True, True)
+    (n,) = set(ctx.char.anims.numbers()) - before
+    act = ctx.char.anims.get(n)
+    assert [(f.group, f.item, f.time) for f in act.frames] == [(-1, 0, -1)]
+    assert not act.frames[0].clsn1 and not act.frames[0].clsn2
+
+    def keep_group(self):
+        seen["from_explorer"] = self.group.currentData()
+        return 0
+    monkeypatch.setattr(animdialogs.NewAnimationDialog, "exec", keep_group)
+    an.new_action(200)
+    assert seen["from_explorer"] == 200
+
+
 def test_right_panel_toggle_reopens_a_collapsed_panel(gui):
     """Ctrl+Alt+N esconde e mostra o painel da direita; recolhido arrastando a divisa (largura
     0, mas "visível"), ele volta numa largura útil em vez de continuar sumido."""
@@ -2092,3 +2239,88 @@ def test_run_uses_the_unsaved_edits_without_saving(gui, monkeypatch):
     a.frames[0].time = old
     win.run_mugen("mugen")                               # salvo: roda o original de novo
     assert calls[-1][1] == "kfm/kfm.def"
+
+
+def test_text_size_changes_interface_and_code_on_the_fly(gui):
+    """Exibir › Tamanho do texto e as Opções mudam a fonte da interface e a dos editores de
+    código na hora (sem reabrir), escalam a folha de estilo e ficam gravados."""
+    import json
+    from charfactory.gui import fonts
+    from charfactory.gui.dialogs import SettingsDialog
+    app, ctx, win, work = gui
+    ed = win.defs.files[0]["edit"]
+    base_code = ed.font().pointSizeF()
+    assert base_code == fonts.CODE_DEFAULT and app.font().pointSizeF() == fonts.UI_DEFAULT
+    win.step_font_size(1)
+    app.processEvents()
+    assert app.font().pointSizeF() == fonts.UI_DEFAULT + 1
+    assert win.menuBar().font().pointSizeF() == fonts.UI_DEFAULT + 1      # o Windows repunha a do sistema
+    assert win.welcome.font().pointSizeF() == fonts.UI_DEFAULT + 1        # filhos da janela, não só o app
+    assert ed.font().pointSizeF() == base_code + 1 and ed.gutter.font().pointSizeF() == base_code
+    assert "12.2pt" in app.styleSheet()                    # o título de 11pt cresceu junto (11 * 10/9)
+    from charfactory.gui.context import config_path
+    saved = json.loads(config_path().read_text("utf-8"))
+    assert saved["ui_font_size"] == 10 and saved["code_font_size"] == 11.5
+    dlg = SettingsDialog(ctx, win)
+    assert dlg.ui_font.value() == 10
+    dlg.ui_font.setValue(12)
+    dlg.code_font.setValue(16)
+    dlg.save()
+    app.processEvents()
+    assert app.font().pointSizeF() == 12 and ed.font().pointSizeF() == 16
+    win.step_font_size(0)
+    assert app.font().pointSizeF() == fonts.UI_DEFAULT and ed.font().pointSizeF() == fonts.CODE_DEFAULT
+    assert "12.2pt" not in app.styleSheet()
+    fonts.set_sizes(99, -5)                                # fora da faixa: fica no limite
+    assert (fonts.ui_size(), fonts.code_size()) == (fonts.UI_RANGE[1], fonts.CODE_RANGE[0])
+    fonts.set_sizes(fonts.UI_DEFAULT, fonts.CODE_DEFAULT)
+
+
+def test_saved_text_size_is_used_when_the_window_opens(mugen_dir, tmp_path, monkeypatch):
+    """Com um tamanho salvo, a janela já abre nele: a tela inicial e a barra de menus também
+    (antes os filhos herdavam a fonte de quando a janela nasceu e o Windows repunha a dos menus)."""
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    app = QApplication.instance() or QApplication([])
+    from charfactory.gui import fonts
+    from charfactory.gui.app import MainWindow
+    from charfactory.gui.context import AppContext
+    ctx = AppContext()
+    ctx.settings["ui_font_size"] = 13
+    win = MainWindow(ctx)
+    win.show()
+    app.processEvents()
+    try:
+        assert win.welcome.font().pointSizeF() == 13 and win.menuBar().font().pointSizeF() == 13
+    finally:
+        from conftest import dispose_window
+        dispose_window(win)
+        fonts.set_sizes(fonts.UI_DEFAULT, fonts.CODE_DEFAULT)
+        MainWindow.apply_ui_font()
+
+
+def test_editor_names_stay_in_the_toolbar_when_little_space_is_missing(gui):
+    """Faltando pouco espaço na faixa de cima (fonte maior, 1440 px), a barra Extra encolhe
+    (ferramentas no '»') em vez de os editores perderem o nome. Faltando muito, eles ficam só
+    com o ícone e todas as ferramentas continuam à vista."""
+    from PySide6.QtCore import Qt
+    app, ctx, win, _ = gui
+    main = win._main_tb
+    text = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+    first = main.widgetForAction(win.editor_actions[0])
+    win.show_page(win.anims)
+    for a in win.editor_actions:
+        main.widgetForAction(a).setToolButtonStyle(text)
+    app.processEvents()
+    need = main.sizeHint().width()
+
+    def at(width):
+        win.resize(width, 768)
+        app.processEvents()
+        assert win.width() == width
+        hidden = [a for a in win.extra.actions() if not a.isSeparator() and not win.extra.widgetForAction(a).isVisible()]
+        return first.toolButtonStyle() == text, len(hidden)
+
+    assert at(need + 20) == (True, 0)
+    named, hidden = at(need - 30)
+    assert named and 0 < hidden <= 2
+    assert at(need - 150) == (False, 0)

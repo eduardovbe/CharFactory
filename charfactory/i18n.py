@@ -17,7 +17,8 @@ import locale
 import os
 from pathlib import Path
 
-LANGUAGES = {"en": "English", "pt_BR": "Português (Brasil)", "es": "Español"}
+LANGUAGES = {"en": "English", "pt_BR": "Português (Brasil)", "es": "Español", "fr": "Français",
+             "zh_CN": "简体中文"}
 LOCALE_DIR = Path(__file__).parent / "locale"
 
 _current = "en"
@@ -37,7 +38,7 @@ def saved_language() -> str | None:
 
 
 def system_language() -> str:
-    """The system language when it is one we have (pt → pt_BR, es → es), else English."""
+    """The system language when it is one we have (pt → pt_BR, es, fr, zh → zh_CN), else English."""
     names = []
     try:
         if os.name == "nt":
@@ -58,6 +59,10 @@ def system_language() -> str:
             return "pt_BR"
         if low.startswith("es") or low.startswith("spanish"):
             return "es"
+        if low.startswith("fr") or low.startswith("french"):
+            return "fr"
+        if low.startswith("zh") or low.startswith("chinese"):
+            return "zh_CN"
     return "en"
 
 
@@ -94,7 +99,7 @@ def tr(text: str) -> str:
 
 def qt_locale_name() -> str | None:
     """Name of Qt's own translation (qtbase_<name>.qm) for the standard dialogs and buttons."""
-    return {"pt_BR": "pt_BR", "es": "es"}.get(_current)
+    return {"pt_BR": "pt_BR", "es": "es", "fr": "fr", "zh_CN": "zh_CN"}.get(_current)
 
 
 set_language(resolve_language())

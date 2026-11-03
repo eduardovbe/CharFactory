@@ -993,6 +993,19 @@ class SettingsDialog(QDialog):
         self.undo_limit = QSpinBox()
         self.undo_limit.setRange(5, 500)
         self.undo_limit.setValue(int(s.get("undo_limit", 100)))
+        from . import fonts
+        self.ui_font = QDoubleSpinBox()
+        self.ui_font.setRange(*fonts.UI_RANGE)
+        self.ui_font.setSingleStep(0.5)
+        self.ui_font.setDecimals(1)
+        self.ui_font.setSuffix(" pt")
+        self.ui_font.setValue(fonts.ui_size())
+        self.code_font = QDoubleSpinBox()
+        self.code_font.setRange(*fonts.CODE_RANGE)
+        self.code_font.setSingleStep(0.5)
+        self.code_font.setDecimals(1)
+        self.code_font.setSuffix(" pt")
+        self.code_font.setValue(fonts.code_size())
         from .. import i18n
         self.language = QComboBox()
         for code, name in i18n.LANGUAGES.items():
@@ -1003,8 +1016,13 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(tr("Options"))
         self.setMinimumWidth(680)
 
+        # rótulos com a mesma largura em todos os grupos: os campos começam na mesma coluna
+        # (cresce com o tamanho do texto e com rótulos longos de outras línguas)
+        label_w = max(int(130 * fonts.ui_scale()), 12 + max(self.fontMetrics().horizontalAdvance(t) for t in (
+            tr("Language"), tr("Interface text"), tr("Code text"), tr("Image editor"), tr("Active profile"),
+            tr("Automatic backup"), tr("Undo limit"), tr("Presets"))))
+
         def group(title: str, rows: list) -> QGroupBox:
-            # rótulos com a mesma largura em todos os grupos: os campos começam na mesma coluna
             g = QGroupBox(title)
             f = QFormLayout(g)
             f.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1017,11 +1035,11 @@ class SettingsDialog(QDialog):
                     lbl.setObjectName("hint")
                     lbl.setWordWrap(True)
                     spacer = QLabel("")
-                    spacer.setFixedWidth(130)
+                    spacer.setFixedWidth(label_w)
                     f.addRow(spacer, lbl)
                 elif isinstance(r, tuple):
                     lbl = QLabel(r[0])
-                    lbl.setFixedWidth(130)
+                    lbl.setFixedWidth(label_w)
                     f.addRow(lbl, r[1])
                 else:
                     f.addRow(r)
@@ -1032,7 +1050,9 @@ class SettingsDialog(QDialog):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(12)
         lay.addWidget(group(tr("Interface"), [
-            (tr("Language"), self.language), tr("The new language is used when the program opens again.")]))
+            (tr("Language"), self.language), tr("The new language is used when the program opens again."),
+            (tr("Interface text"), self.ui_font), (tr("Code text"), self.code_font),
+            tr("View › Text size (Ctrl+Alt+= / Ctrl+Alt+-) changes both without opening this window.")]))
         lay.addWidget(group(tr("Folders and programs"), [
             (tr("MUGEN"), _pair(self.mugen, b)),
             ("Ikemen GO", _pair(self.ikemen, b5)),
@@ -1076,6 +1096,8 @@ class SettingsDialog(QDialog):
         s["ffmpeg"] = self.ffmpeg.text().strip()
         s["undo_limit"] = self.undo_limit.value()
         s["image_editor"] = self.image_editor.text().strip()
+        s["ui_font_size"] = self.ui_font.value()
+        s["code_font_size"] = self.code_font.value()
         s["language"] = self.language.currentData()
         self.language_changed = s["language"] != self._lang0
         s.save()

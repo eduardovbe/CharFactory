@@ -229,3 +229,41 @@ def auto_clsn_action(char: Character, action_num: int,
         count += 1
     char.mark("anims")
     return count
+
+
+# tipo da caixa automática: colisão (Clsn2, azul, onde o golpe pega), dano (Clsn1, vermelha, o
+# que acerta: um projétil inteiro) ou as duas; formato: anatômico (cabeça, tronco, pernas) ou
+# um retângulo só na área do sprite
+BOX_KINDS = ("collision", "damage", "both")
+BOX_SHAPES = ("anatomical", "rect")
+
+
+def auto_boxes(char: Character, group: int, item: int, kind: str = "collision",
+               shape: str = "anatomical") -> tuple[list | None, list | None]:
+    """(clsn1, clsn2) automáticos do sprite; None no lado que o tipo não pede. O anatômico cai
+    no retângulo quando a silhueta é pequena demais para separar as partes."""
+    from . import ops
+    boxes = anatomical_clsn2(char, group, item) if shape == "anatomical" else []
+    if not boxes:
+        boxes = ops.auto_clsn(char, group, item)
+    boxes = [tuple(b) for b in boxes]
+    return (list(boxes) if kind in ("damage", "both") else None,
+            list(boxes) if kind in ("collision", "both") else None)
+
+
+def apply_auto_boxes(char: Character, action: Action, kind: str = "collision", shape: str = "anatomical",
+                     only_empty: bool = False) -> int:
+    """Caixas automáticas em todos os frames da ação; com only_empty, só onde o lado ainda não
+    tem caixa (as feitas à mão ficam). Devolve quantos frames mudaram."""
+    changed = 0
+    for fr in action.frames:
+        c1, c2 = auto_boxes(char, fr.group, fr.item, kind, shape)
+        touched = False
+        if c1 is not None and c1 and not (only_empty and fr.clsn1):
+            fr.clsn1, touched = c1, True
+        if c2 is not None and c2 and not (only_empty and fr.clsn2):
+            fr.clsn2, touched = c2, True
+        changed += touched
+    if changed:
+        char.mark("anims")
+    return changed

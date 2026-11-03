@@ -23,8 +23,8 @@ def config_path() -> Path:
 
 class Settings(dict):
     DEFAULTS = {"theme": "Default", "mugen_dir": "", "ikemen_dir": "", "run_engine": "auto", "recent": [], "geometry": None,
-                "onion": True, "zoom": 2, "autosave_min": 5, "file_watcher": True,
-                "undo_limit": 100, "snippets": {}}
+                "onion_on": False, "onion_opacity": 35, "zoom": 2, "autosave_min": 5, "file_watcher": True,
+                "undo_limit": 100, "snippets": {}, "ui_font_size": 9.0, "code_font_size": 10.5}
 
     @classmethod
     def load(cls) -> "Settings":

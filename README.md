@@ -24,7 +24,7 @@
   <a href="#command-line">Command line</a> ·
   <a href="#development">Development</a>
   <br>
-  <sub>English · Español · Português (Brasil)</sub>
+  <sub><b>English</b> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a> · <a href="README.pt-BR.md">Português (Brasil)</a> · <a href="README.zh-CN.md">简体中文</a></sub>
 </p>
 
 ## Get started
@@ -287,6 +287,8 @@ timeline sized by its duration, MUGEN 1.1 scale, angle and interpolation, and GI
 - **Stages:** layers, properties and a preview with camera and parallax.
 - **Projects:** several characters in tabs, undo and redo everywhere, automatic backup, compare with a
   backup, find and replace in every file, open and pack `.zip` files.
+- **Languages:** English, Spanish, French, Portuguese (Brazil) and Simplified Chinese, with adjustable
+  text size for the interface and the code.
 
 </details>
 

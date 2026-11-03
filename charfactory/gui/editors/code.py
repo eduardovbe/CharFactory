@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QCompleter, QPlainTextEdit, QTextEdit, QToolTip, Q
 
 from ... import validate
 from ...formats import mtext
-from ..fonts import code_font
+from ..fonts import code_font, code_size, track_code_widget
 from ..theme import Theme
 from ...i18n import tr
 
@@ -292,14 +292,11 @@ class CodeEdit(QPlainTextEdit):
 
     def __init__(self, theme: Theme):
         super().__init__()
-        font = code_font(10.5)
-        self.setFont(font)
-        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
         self.setCursorWidth(2)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.gutter = LineNumbers(self)
-        gfont = code_font(9.5)
-        self.gutter.setFont(gfont)
+        self.apply_code_font(update_margins=False)
+        track_code_widget(self)
         self.blockCountChanged.connect(lambda _: self.setViewportMargins(self.gutter_width(), 0, 0, 0))
         self.updateRequest.connect(self._update_gutter)
         self.cursorPositionChanged.connect(self.refresh_selections)
@@ -342,6 +339,17 @@ class CodeEdit(QPlainTextEdit):
         self.gutter.update()
 
     # ------------------------------------------------------------ margem
+
+    def apply_code_font(self, update_margins: bool = True) -> None:
+        """Fonte do código no tamanho das opções (a margem dos números fica 1 pt menor)."""
+        self.setFont(code_font())
+        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
+        self.gutter.setFont(code_font(max(6.0, code_size() - 1)))
+        if update_margins:
+            self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+            cr = self.contentsRect()
+            self.gutter.setGeometry(QRect(cr.left(), cr.top(), self.gutter_width(), cr.height()))
+            self.gutter.update()
 
     def gutter_width(self) -> int:
         # ponto de problema | número da linha | seta de dobrar (a seta não encosta mais no número)

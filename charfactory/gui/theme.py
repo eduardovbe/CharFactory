@@ -109,7 +109,8 @@ class Theme:
         return path
 
     def stylesheet(self) -> str:
-        return build_qss({**self.ui, "code_bg": self.c("background").hex}, write_assets(self))
+        from .fonts import scale_qss, ui_scale
+        return scale_qss(build_qss({**self.ui, "code_bg": self.c("background").hex}, write_assets(self)), ui_scale())
 
 
 def _slug(name: str) -> str:
@@ -302,7 +303,7 @@ QToolButton {{ background: transparent; border: 1px solid transparent; border-ra
 QToolButton:hover {{ background: {u['panel_alt']}; color: {u['text']}; }}
 QToolButton:pressed {{ background: {u['button_hover']}; }}
 QToolButton:checked {{ background: {u['accent_soft']}; color: {u['accent']}; }}
-QToolButton[segment="true"] {{ padding: 4px 9px; font-weight: 600; }}
+QToolButton[segment="true"] {{ padding: 4px 6px; font-weight: 600; }}
 QToolButton[segment="true"]:checked {{ background: {u['accent_soft']}; color: {u['accent']}; border: 1px solid {u['accent_soft']}; }}
 QToolButton::menu-indicator {{ image: none; }}
 QToolButton[popupMode="1"] {{ padding-right: 20px; margin-right: 4px; }}

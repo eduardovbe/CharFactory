@@ -52,7 +52,7 @@ version = { attr = "charfactory.__version__" }
 include = ["charfactory*"]
 
 [tool.setuptools.package-data]
-charfactory = ["data/*.json", "locale/*.json", "gui/themes/*.json", "gui/fonts/*", "gui/assets/*"]
+charfactory = ["data/*.json", "data/docs_i18n/*.json", "locale/*.json", "gui/themes/*.json", "gui/fonts/*", "gui/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

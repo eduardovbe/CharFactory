@@ -7,7 +7,7 @@ import re
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QSizePolicy, QSplitter, QVBoxLayout,
+                               QListWidgetItem, QMessageBox, QSizePolicy, QSlider, QSplitter, QVBoxLayout,
                                QWidget)
 
 from ...formats import air
@@ -38,7 +38,7 @@ class AnimationEditor(QWidget):
             ("play", tr("Play (Ctrl+P)"), self.on_play, True),
             ("stop", tr("Stop (Ctrl+T)"), self.stop),
             None,
-            ("new", tr("Add (Ins)"), self.new_action),
+            ("new", tr("Add (Ins)"), lambda: self.new_action()),
             ("delete", tr("Delete (Ctrl+Del)"), self.delete_action),
             ("duplicate", tr("Duplicate (Ctrl+D)"), self.duplicate_action),
             MORE,
@@ -101,6 +101,7 @@ class AnimationEditor(QWidget):
             ("box_anatomic", tr("Anatomical Clsn2 (head, torso, legs)"), self.auto_box_anatomical),
             ("box_auto_attack", tr("Automatic attack Clsn1 (extended limb)"), self.auto_box_attack),
             ("box_interp", tr("Interpolate boxes between this frame and another…"), self.interpolate_clsn_dialog),
+            ("box_anatomic", tr("Automatic boxes on all frames…"), self.auto_boxes_all),
             None,
             ("box_all_frames", tr("This frame's boxes on all frames of the animation (default)"), self.boxes_to_all_frames),
             ("box_instances", tr("This frame's boxes on every occurrence of this sprite (all animations)"), self.boxes_to_instances),
@@ -108,9 +109,19 @@ class AnimationEditor(QWidget):
             None,
             ("wizard", tr("Create a move in the Wizard from this animation · Ctrl+Shift+M"), self.open_move_wizard),
         ], 18)
+        # onion skin começa desligado e lembra a escolha ("onion_on": a chave antiga "onion" já
+        # vinha gravada como ligada no config de todo mundo)
         self.onion = QCheckBox(tr("Show"))
-        self.onion.setChecked(bool(ctx.settings.get("onion", True)))
-        self.onion.toggled.connect(lambda _: self.show_frame())
+        self.onion.setChecked(bool(ctx.settings.get("onion_on", False)))
+        self.onion.toggled.connect(self._onion_toggled)
+        self.onion_action = None             # botão da barra de cima (o app recria a cada troca de página)
+        self.onion_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.onion_opacity.setRange(10, 90)
+        self.onion_opacity.setValue(int(ctx.settings.get("onion_opacity", 35)))
+        self.onion_opacity.setToolTip(tr("Onion skin opacity"))
+        self.onion_opacity_label = QLabel(f"{self.onion_opacity.value()}%")
+        self.onion_opacity_label.setMinimumWidth(36)
+        self.onion_opacity.valueChanged.connect(self._onion_opacity)
         self.onion_mode = QComboBox()
         self.onion_mode.addItems([tr("previous frame"), tr("other animation")])
         self.onion_anim = spin(-1, 99999999)
@@ -153,13 +164,16 @@ class AnimationEditor(QWidget):
                   tool_button("delete", tr("Delete frame (Ctrl+Shift+Del)"), self.del_frame, size=16)):
             frame_sec.add_header_widget(b)
         self.frame_nav.setToolTip(tr("Choose the frame (arrows: previous/next). It does not change its time or position."))
-        self.offset.trailing.addWidget(apply_btn(tr("Apply offset to the next frames (Alt+Shift+O)"), "offset"),
-                                       0, Qt.AlignmentFlag.AlignVCenter)
         frame_sec.add(self.frame_nav, self.gi,
                       form_row(tr("Time"), self.time, apply_btn(tr("Apply time to the next frames (Alt+Shift+T)"), "time")),
-                      self.offset,
-                      form_row(tr("Flip"), self.flip, apply_btn(tr("Apply flip to the next frames (Alt+Shift+F)"), "flip")),
                       self.loop)
+
+        # posição do frame atual: offset e espelhamento, à parte do sprite e do tempo
+        pos_sec = Section(tr("Position"), "anims.position")
+        self.offset.trailing.addWidget(apply_btn(tr("Apply offset to the next frames (Alt+Shift+O)"), "offset"),
+                                       0, Qt.AlignmentFlag.AlignVCenter)
+        pos_sec.add(self.offset,
+                    form_row(tr("Flip"), self.flip, apply_btn(tr("Apply flip to the next frames (Alt+Shift+F)"), "flip")))
 
         blend_sec = Section(tr("Transparency and scale"), "anims.blend", collapsed=True)
         ip = QGridLayout()
@@ -195,13 +209,14 @@ class AnimationEditor(QWidget):
         onion_row = QHBoxLayout()
         onion_row.addWidget(self.onion)
         onion_row.addWidget(self.onion_mode, 1)
-        onion_sec.add(onion_row, self.onion_other)
+        opacity_row = form_row(tr("Opacity"), self.onion_opacity, self.onion_opacity_label)
+        onion_sec.add(onion_row, opacity_row, self.onion_other)
 
         content = QWidget()
         lv = QVBoxLayout(content)
         lv.addWidget(self.tools)
         lv.addWidget(self.nav)
-        for sec in (frame_sec, act_sec, box_sec, blend_sec, onion_sec):
+        for sec in (act_sec, frame_sec, pos_sec, box_sec, blend_sec, onion_sec):
             lv.addWidget(sec)
         lv.addWidget(hint_label(tr("Ctrl+drag the sprite changes the offset; arrows move 1 px (Shift: 10).")))
         lv.addStretch()
@@ -212,6 +227,7 @@ class AnimationEditor(QWidget):
         self.canvas = SpriteCanvas()
         self.canvas.edit_boxes = True
         self.canvas.zoom = 3
+        self.canvas.onion_opacity = self.onion_opacity.value() / 100
         self.canvas.boxesChanged.connect(self.on_boxes)
         self.canvas.drawModeExit.connect(lambda: [a.setChecked(False) for a in self.box_tools.actions_by_tip.values()
                                                   if a.isCheckable()])
@@ -387,6 +403,26 @@ class AnimationEditor(QWidget):
         self._draw_layer(f, onion=False)
         self._draw_onion(a)
         self.canvas.set_boxes(f.clsn1, f.clsn2)
+
+    def _onion_toggled(self, on: bool) -> None:
+        """Liga/desliga o onion skin (caixa da seção ou botão da barra de cima) e lembra."""
+        self.ctx.settings["onion_on"] = on
+        self.ctx.settings.save()
+        act = self.onion_action
+        if act is not None:
+            try:
+                if act.isChecked() != on:
+                    act.setChecked(on)
+            except RuntimeError:            # a barra foi refeita: o botão antigo já não existe
+                self.onion_action = None
+        self.show_frame()
+
+    def _onion_opacity(self, v: int) -> None:
+        self.onion_opacity_label.setText(f"{v}%")
+        self.canvas.onion_opacity = v / 100
+        self.ctx.settings["onion_opacity"] = v
+        self.ctx.settings.save()
+        self.canvas.update()
 
     def _draw_onion(self, a) -> None:
         """Frame anterior, ou o frame de outra animação (ex.: o parado, para alinhar)."""
@@ -717,17 +753,53 @@ class AnimationEditor(QWidget):
 
     # ------------------------------------------------------------ ações
 
-    def new_action(self) -> None:
-        n, ok = QInputDialog.getInt(self, tr("New animation"), tr("Number:"), (max(self.numbers()) + 1) if self.numbers() else 0, -1, 99999999)
-        if not ok:
+    def auto_boxes_all(self) -> None:
+        """Caixas automáticas (colisão, dano ou as duas; anatômica ou retângulo) em todos os
+        frames de uma vez, em vez de frame por frame."""
+        from ..animdialogs import AutoBoxesDialog
+        a = self.action()
+        if not a or not a.frames:
             return
-        if n in self.numbers():
-            QMessageBox.warning(self, tr("New animation"), tr("Action {0} already exists.").format(n))
+        dlg = AutoBoxesDialog(len(a.frames), self)
+        if dlg.exec():
+            kind, shape = dlg.opts.values()
+            n = clsnkit.apply_auto_boxes(self.char, a, kind, shape, dlg.only_empty.isChecked())
+            self._changed()
+            self.show_frame()
+            self.ctx.status.emit(tr("Boxes generated on {0} frame(s)").format(n))
+        dlg.deleteLater()
+
+    def new_action(self, group: int | None = None) -> None:
+        """Nova animação pela janela: grupo de sprites (todos ou uma faixa) ou nenhum (um frame
+        vazio), tempo dos frames e caixas automáticas já na criação."""
+        from ..animdialogs import NewAnimationDialog
+        if not self.char:
             return
-        f = self.frame()
-        ops.create_action(self.char, n, [{"group": f.group if f else 0, "item": f.item if f else 0, "time": 5}])
-        self.ctx.changed("anims")
-        QTimer.singleShot(20, lambda: self.select_action(n))
+        start = (max(self.numbers()) + 1) if self.numbers() else 0
+        dlg = NewAnimationDialog(self.char, group if group is not None else start, group, self)
+        if dlg.exec():
+            v = dlg.result_values()
+            frames = []
+            if v["group"] is None:                    # sem grupo: um frame vazio para preencher depois
+                frames.append({"group": -1, "item": 0, "time": v["time"], "clsn2": []})
+            for i in v["items"]:
+                fd = {"group": v["group"], "item": i, "time": v["time"]}
+                if v["kind"]:
+                    c1, c2 = clsnkit.auto_boxes(self.char, v["group"], i, v["kind"], v["shape"])
+                    if c1:
+                        fd["clsn1"] = c1
+                    if c2:
+                        fd["clsn2"] = c2
+                else:
+                    fd["clsn2"] = []                  # sem caixas: o create_action não põe a automática
+                frames.append(fd)
+            n = v["number"]
+            ops.create_action(self.char, n, frames)
+            if v["name"]:
+                self.char.anims.set_name(n, v["name"])
+            self.ctx.changed("anims")
+            QTimer.singleShot(20, lambda: self.select_action(n))
+        dlg.deleteLater()
 
     def duplicate_action(self) -> None:
         a = self.action()
@@ -800,14 +872,8 @@ class AnimationEditor(QWidget):
 
     def new_from_group(self) -> None:
         g = self.group_combo.currentData()
-        if g is None:
-            return
-        n, ok = QInputDialog.getInt(self, tr("New animation"), tr("Animation number with group {0}:").format(g), g, -1, 99999999)
-        if ok:
-            items = sorted(s.item for s in self.char.sprites.sprites if s.group == g)
-            ops.create_action(self.char, n, [{"group": g, "item": i, "time": 4} for i in items])
-            self.ctx.changed("anims")
-            QTimer.singleShot(20, lambda: self.select_action(n))
+        if g is not None:
+            self.new_action(g)               # a mesma janela, já com o grupo do explorador
 
     # ------------------------------------------------------------ reprodução
 

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QFile
 from .. import archive, i18n
 from ..project import ProjectError
 from ..tools import generate, ops, runner
-from . import dialogs, theme as themes
+from . import dialogs, fonts, theme as themes
 from .context import AppContext
 from .editors.animations import AnimationEditor
 from .editors.codepages import CodePage
@@ -224,6 +224,9 @@ class Welcome(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self, ctx: AppContext):
+        # a fonte do app antes de criar a janela: filhos postos nela depois herdariam a antiga
+        fonts.set_sizes(ctx.settings.get("ui_font_size"), ctx.settings.get("code_font_size"))
+        MainWindow.apply_ui_font()
         super().__init__()
         self.ctx = ctx
         self.restart_requested = False    # trocar o idioma reabre o app ao fechar
@@ -232,9 +235,6 @@ class MainWindow(QMainWindow):
         install_ui_polish(QApplication.instance())
         if getattr(QApplication.instance(), "_charfactory_translator", None) is None:
             install_translator(QApplication.instance())
-        from PySide6.QtGui import QFontDatabase
-        family = "Segoe UI Variable Text" if "Segoe UI Variable Text" in QFontDatabase.families() else "Segoe UI"
-        QApplication.instance().setFont(QFont(family, 9))
         self.resize(1440, 900)
 
         # páginas, na ordem dos botões de editor
@@ -429,6 +429,7 @@ class MainWindow(QMainWindow):
 
         self.build_menus()
         self.build_toolbars()
+        self.apply_menu_font()
         ctx.status.connect(self.flash)
         ctx.characterChanged.connect(self.on_character)
         ctx.projectsChanged.connect(self.fill_project_tabs)
@@ -556,6 +557,10 @@ class MainWindow(QMainWindow):
         self.theme_menu.aboutToShow.connect(self.fill_themes)
         self.act(v, tr("Theme editor…"), self.theme_editor, "Ctrl+Shift+T", "theme")
         self.act(v, tr("Import colorset (.xml)…"), self.import_colorset)
+        size_menu = v.addMenu(tr("Text size"))
+        self.act(size_menu, tr("Larger"), lambda: self.step_font_size(1), "Ctrl+Alt+=")
+        self.act(size_menu, tr("Smaller"), lambda: self.step_font_size(-1), "Ctrl+Alt+-")
+        self.act(size_menu, tr("Default size"), lambda: self.step_font_size(0), "Ctrl+Alt+0")
         # idioma: cada um no próprio idioma, para quem não lê o atual achar o seu
         lang_menu = v.addMenu(tr("Language"))
         lang_group = QActionGroup(self)
@@ -702,13 +707,47 @@ class MainWindow(QMainWindow):
         main.addAction(icon("command"), tr("Command palette (F1)"), self.command_palette)
         main.addAction(icon("options"), tr("Options (Ctrl+K)"), self.settings_dialog)
         self.addToolBar(main)
+        self._main_tb = main
+
+    def _fit_toolbar(self) -> None:
+        """Faixa de cima numa janela estreita. Faltando pouco (fonte maior), a barra Extra
+        encolhe e até duas ferramentas vão para o '»' dela, mantendo o nome dos editores.
+        Faltando mais (1366 px), os editores ficam só com o ícone (o nome vai na dica); com o nome, o Qt
+        escondia a barra Extra inteira (zoom, guias, caixas, onion) e o Rodar."""
+        main = getattr(self, "_main_tb", None)
+        if main is None or getattr(self, "_fitting", False):
+            return
+        self._fitting = True
+        try:
+            buttons = [main.widgetForAction(a) for a in self.editor_actions]
+            buttons = [b for b in buttons if isinstance(b, QToolButton)]
+            for b in buttons:
+                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            extra_w = self.extra.sizeHint().width() if self.extra.actions() else 0
+            self.extra.setMaximumWidth(16777215)
+            self.extra.setMinimumWidth(extra_w)
+            over = main.sizeHint().width() - self.width()
+            if 0 < over <= min(70, extra_w * 0.4):          # até ~2 ferramentas no '»'
+                w = extra_w - over - 8
+                self.extra.setMinimumWidth(w)
+                self.extra.setMaximumWidth(w)
+            elif over > 0:
+                for b in buttons:
+                    b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+                    b.setToolTip(b.defaultAction().text().replace("&", "") if b.defaultAction() else b.toolTip())
+        finally:
+            self._fitting = False
+
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self._fit_toolbar()
 
     def fill_extra(self, page) -> None:
         """Barra 'Extra' contextual (escondida quando não há ações)."""
         self._fill_extra(page)
-        # a barra fica num layout: sem isso ela guarda a largura do editor anterior e manda
-        # os últimos botões para o '»' de extensão
-        self.extra.setMinimumWidth(self.extra.sizeHint().width())
+        # cada editor tem uma barra Extra de largura diferente: o _fit_toolbar dá a ela a
+        # largura inteira (senão guardava a do editor anterior) ou encolhe se faltar espaço
+        self._fit_toolbar()
 
     def _fill_extra(self, page) -> None:
         # clear() só tira as ações da barra; sem apagar, cada troca de página deixava ~18 QActions
@@ -771,6 +810,12 @@ class MainWindow(QMainWindow):
                 a.setCheckable(True)
                 a.setChecked(getattr(cv, attr))
                 a.toggled.connect(lambda on, at=attr, c=cv: (setattr(c, at, on), c.update()))
+            if page is self.anims:      # onion skin: liga e desliga daqui (a caixa ficava numa seção fechada)
+                a = self.extra.addAction(icon("onion"), tr("Onion skin (previous frame, faded)"))
+                a.setCheckable(True)
+                a.setChecked(page.onion.isChecked())
+                a.toggled.connect(page.onion.setChecked)
+                page.onion_action = a
             from . import backdrop
             bg = self.extra.addAction(icon("stage"), tr("Stage background: where the ground is (none, simple, MUGEN stage or image)"))
             if getattr(self, "_backdrop_menu", None) is None:      # um só, não um por troca de aba
@@ -1953,8 +1998,55 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ vigia de arquivos e backup automático
 
+    @staticmethod
+    def apply_ui_font() -> None:
+        from PySide6.QtGui import QFontDatabase
+        fonts.load()      # registrar fontes depois repõe a fonte padrão nos widgets: antes de tudo
+        family = "Segoe UI Variable Text" if "Segoe UI Variable Text" in QFontDatabase.families() else "Segoe UI"
+        f = QFont(family)
+        f.setPointSizeF(fonts.ui_size())
+        app = QApplication.instance()
+        app.setFont(f)
+        for cls in ("QMenuBar", "QMenu", "QToolTip"):     # o Windows dá a estes a fonte do sistema
+            app.setFont(f, cls)
+
+    def apply_menu_font(self) -> None:
+        """Ao mostrar a janela o Windows repõe a fonte de menu do sistema na barra e nos menus:
+        fixada em cada um, ela segue o tamanho escolhido."""
+        f = QApplication.instance().font()
+        for m in (self.menuBar(), *self.findChildren(QMenu)):
+            m.setFont(f)
+
+    def apply_font_sizes(self) -> None:
+        """Aplica na hora os tamanhos de texto salvos (interface e código)."""
+        s = self.ctx.settings
+        old = (fonts.ui_size(), fonts.code_size())
+        fonts.set_sizes(s.get("ui_font_size"), s.get("code_font_size"))
+        if old[0] != fonts.ui_size():
+            self.apply_ui_font()
+            self.apply_theme()        # a folha de estilo escala títulos e dicas junto
+            self.apply_menu_font()
+        if old[1] != fonts.code_size():
+            fonts.refresh_code_widgets()
+
+    def step_font_size(self, delta: int) -> None:
+        """Exibir › Tamanho do texto: um passo maior/menor (0 volta ao padrão) na interface e no código."""
+        s = self.ctx.settings
+        if delta == 0:
+            s["ui_font_size"], s["code_font_size"] = fonts.UI_DEFAULT, fonts.CODE_DEFAULT
+        else:
+            s["ui_font_size"] = fonts.ui_size() + delta
+            s["code_font_size"] = fonts.code_size() + delta
+        s["ui_font_size"] = min(max(s["ui_font_size"], fonts.UI_RANGE[0]), fonts.UI_RANGE[1])
+        s["code_font_size"] = min(max(s["code_font_size"], fonts.CODE_RANGE[0]), fonts.CODE_RANGE[1])
+        s.save()
+        self.ctx.settingsChanged.emit()
+        self.flash(tr("Text size: interface {0} pt, code {1} pt").format(
+            f"{fonts.ui_size():g}", f"{fonts.code_size():g}"))
+
     def apply_settings(self) -> None:
         from .editors.code import CodeEdit
+        self.apply_font_sizes()
         CodeEdit.auto_indent = bool(self.ctx.settings.get("auto_indent", True))
         m = int(self.ctx.settings.get("autosave_min") or 0)
         if m > 0:

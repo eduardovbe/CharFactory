@@ -1,12 +1,12 @@
 """Confere as traduções: todo tr("...") do código tem entrada em cada catálogo, as lacunas
-({0}, {1:.2f}…) são as mesmas nas três línguas e nenhum catálogo guarda texto que o código não usa.
+({0}, {1:.2f}…) são as mesmas em todas as línguas e nenhum catálogo guarda texto que o código não usa.
 Confere também os textos da doc dos controllers (charfactory/data/docs_i18n, ver sctrldocs.py).
 
     python tools/i18n_check.py          # relatório; sai com erro se faltar algo
     python tools/i18n_check.py --fix    # também tira dos catálogos as entradas sem uso
 
 Para traduzir um texto novo: escreva-o em inglês dentro de tr() no código e acrescente a mesma
-chave em charfactory/locale/pt_BR.json e charfactory/locale/es.json.
+chave em cada charfactory/locale/<língua>.json (pt_BR, es, fr, zh_CN).
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "charfactory"
-LOCALES = ("pt_BR", "es")
+LOCALES = ("pt_BR", "es", "fr", "zh_CN")
 HOLE = re.compile(r"(?<!\{)\{(\d+)[^{}]*\}(?!\})")
 
 
