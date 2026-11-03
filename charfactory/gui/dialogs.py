@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDia
                                QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from .. import osutil
+from .. import osutil
 from ..formats import cns
 from ..tools import generate, ops, render
 from . import theme as themes
@@ -984,12 +986,12 @@ class SettingsDialog(QDialog):
         self.ffmpeg.setPlaceholderText(tr("empty = search the PATH (to import OGG/MP3/FLAC)"))
         b4 = QPushButton("…")
         b4.clicked.connect(lambda: self.ffmpeg.setText(
-            QFileDialog.getOpenFileName(self, "ffmpeg", "", tr("Program (*.exe)"))[0] or self.ffmpeg.text()))
+            QFileDialog.getOpenFileName(self, "ffmpeg", "", osutil.program_filter())[0] or self.ffmpeg.text()))
         self.image_editor = QLineEdit(s.get("image_editor", ""))
         self.image_editor.setPlaceholderText(tr("Aseprite.exe… (empty = default program for PNG)"))
         b3 = QPushButton("…")
         b3.clicked.connect(lambda: self.image_editor.setText(
-            QFileDialog.getOpenFileName(self, tr("Image editor"), "", tr("Program (*.exe)"))[0] or self.image_editor.text()))
+            QFileDialog.getOpenFileName(self, tr("Image editor"), "", osutil.program_filter())[0] or self.image_editor.text()))
         self.undo_limit = QSpinBox()
         self.undo_limit.setRange(5, 500)
         self.undo_limit.setValue(int(s.get("undo_limit", 100)))

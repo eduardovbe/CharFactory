@@ -3,20 +3,19 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from .. import project
+from .. import osutil, project
 from ..formats import sff as sffmod
 from . import theme as themes
 from ..i18n import tr
 
 
 def config_path() -> Path:
-    p = Path(os.environ.get("APPDATA", Path.home())) / "charfactory" / "config.json"
+    p = osutil.config_dir() / "config.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 

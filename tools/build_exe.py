@@ -1,10 +1,13 @@
-"""Gera o executável do Char Factory com o PyInstaller (pasta com o .exe e as DLLs).
+"""Gera o executável do Char Factory com o PyInstaller, no sistema em que roda.
 
-    python tools/build_exe.py            # -> dist/Char Factory/Char Factory.exe
+    python tools/build_exe.py            # Windows: dist/Char Factory/Char Factory.exe
+                                         # macOS:   dist/Char Factory.app
+                                         # Linux:   dist/Char Factory/Char Factory
     python tools/build_exe.py dist/novo  # outra pasta (o exe antigo aberto trava a pasta padrão)
 
 Precisa do PyInstaller no mesmo Python do projeto (pip install pyinstaller). O ícone vem de
-charfactory/gui/assets/charfactory.ico (tools/build_app_icon.py). As ferramentas do charfactory são importadas sob
+charfactory/gui/assets/charfactory.ico no Windows e do .png no macOS (o PyInstaller converte com o
+Pillow); tools/build_app_icon.py gera os dois. As ferramentas do charfactory são importadas sob
 demanda, então todos os submódulos e arquivos de dados do pacote vão junto.
 """
 from __future__ import annotations
@@ -29,15 +32,22 @@ def main() -> int:
     entry = work / "charfactory_gui_main.py"
     work.mkdir(parents=True, exist_ok=True)
     entry.write_text("from charfactory.gui.launch import main\nraise SystemExit(main())\n", "utf-8")
+    assets = ROOT / "charfactory" / "gui" / "assets"
     args = [str(entry), "--name", NAME, "--windowed", "--noconfirm", "--clean",
-            "--icon", str(ROOT / "charfactory" / "gui" / "assets" / "charfactory.ico"),
             "--paths", str(ROOT),
             "--collect-submodules", "charfactory", "--collect-data", "charfactory",
             "--distpath", str(dist), "--workpath", str(work), "--specpath", str(work)]
+    if sys.platform == "win32":
+        args += ["--icon", str(assets / "charfactory.ico")]
+        exe = dist / NAME / f"{NAME}.exe"
+    elif sys.platform == "darwin":
+        args += ["--icon", str(assets / "charfactory.png"), "--osx-bundle-identifier", "io.github.eduardovbe.charfactory"]
+        exe = dist / f"{NAME}.app" / "Contents" / "MacOS" / NAME
+    else:
+        exe = dist / NAME / NAME
     for m in EXCLUDE:
         args += ["--exclude-module", m]
     PyInstaller.__main__.run(args)
-    exe = dist / NAME / f"{NAME}.exe"
     print("executable:", exe if exe.exists() else "not built")
     return 0 if exe.exists() else 1
 

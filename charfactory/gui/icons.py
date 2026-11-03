@@ -11,6 +11,8 @@ import math
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap
 
+from . import fonts
+
 _COLORS = {"normal": "#52525b", "active": "#6366f1", "disabled": "#a1a1aa",
            "red": "#ef4444", "blue": "#3b82f6", "green": "#22c55e",
            "error": "#f87171", "warning": "#fbbf24"}
@@ -67,7 +69,7 @@ class _Pen:
         self.p.drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), int(start * 16), int(span * 16))
 
     def text(self, s, size=7.5, bold=True):
-        f = QFont("Segoe UI", 1)
+        f = QFont(fonts.ui_family(), 1)
         f.setPointSizeF(size)
         f.setBold(bold)
         self.p.setFont(f)
@@ -1027,7 +1029,7 @@ class BadgeIconEngine(_VectorEngine):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(self.color))
         p.drawRoundedRect(QRectF(2, 2, 20, 20), 5.5, 5.5)
-        f = QFont("Segoe UI")
+        f = QFont(fonts.ui_family())
         f.setPixelSize(14)
         f.setBold(True)
         p.setFont(f)

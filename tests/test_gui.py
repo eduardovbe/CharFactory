@@ -14,7 +14,7 @@ from charfactory import project  # noqa: E402
 
 @pytest.fixture()
 def gui(mugen_dir, tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("CHARFACTORY_CONFIG_HOME", str(tmp_path / "appdata"))
     work = tmp_path / "chars" / "kfm"
     shutil.copytree(mugen_dir / "chars" / "kfm", work)
     (tmp_path / "data").mkdir()
@@ -288,7 +288,7 @@ def test_palette_changes_show_live(gui, monkeypatch):
 
 
 def test_theme_import_colorset_and_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("CHARFACTORY_CONFIG_HOME", str(tmp_path))
     from charfactory.gui import theme
     xml = tmp_path / "Teste.xml"
     xml.write_text('<?xml version="1.0"?><colors><color name="background" value="10,20,30"/>'
@@ -1577,6 +1577,7 @@ def test_run_in_mugen_or_ikemen_from_the_debug_menu(gui, monkeypatch):
         def poll(self):
             return 0
     monkeypatch.setattr(app_mod.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(app_mod.osutil, "command", lambda args: args)
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
     names = {a.text().replace("&", ""): a for m in win.menuBar().actions() if m.menu() for a in m.menu().actions()}
     names["Run in Ikemen GO"].trigger()
@@ -2222,6 +2223,7 @@ def test_run_uses_the_unsaved_edits_without_saving(gui, monkeypatch):
         def poll(self):
             return 0
     monkeypatch.setattr(app_mod.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(app_mod.osutil, "command", lambda args: args)
     air = work / "kfm.air"
     before = air.read_bytes()
     a = ctx.char.anims.get(0)
@@ -2279,7 +2281,7 @@ def test_text_size_changes_interface_and_code_on_the_fly(gui):
 def test_saved_text_size_is_used_when_the_window_opens(mugen_dir, tmp_path, monkeypatch):
     """Com um tamanho salvo, a janela já abre nele: a tela inicial e a barra de menus também
     (antes os filhos herdavam a fonte de quando a janela nasceu e o Windows repunha a dos menus)."""
-    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("CHARFACTORY_CONFIG_HOME", str(tmp_path / "appdata"))
     app = QApplication.instance() or QApplication([])
     from charfactory.gui import fonts
     from charfactory.gui.app import MainWindow

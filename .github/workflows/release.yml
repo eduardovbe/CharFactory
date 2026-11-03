@@ -1,4 +1,4 @@
-# On a v* tag (e.g. v1.0.0), builds Char Factory.exe and attaches the zip to the Release.
+# On a v* tag (e.g. v1.0.0), builds Char Factory for Windows, macOS and Linux and attaches them to the Release.
 name: release
 
 on:
@@ -9,8 +9,18 @@ permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-22.04
+            target: linux
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,11 +32,30 @@ jobs:
           pip install ".[gui]" pyinstaller
       - name: Build the executable
         run: python tools/build_exe.py
-      - name: Zip
+      - name: Zip (Windows)
+        if: matrix.target == 'windows'
         shell: pwsh
         run: Compress-Archive -Path "dist/Char Factory" -DestinationPath "Char-Factory-${{ github.ref_name }}-windows.zip"
+      - name: Zip (macOS)
+        if: matrix.target == 'macos'
+        run: ditto -c -k --keepParent "dist/Char Factory.app" "Char-Factory-${{ github.ref_name }}-macos.zip"
+      - name: Tar (Linux)
+        if: matrix.target == 'linux'
+        run: tar -czf "Char-Factory-${{ github.ref_name }}-linux.tar.gz" -C dist "Char Factory"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: Char-Factory-*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
       - name: Publish to the Release
         uses: softprops/action-gh-release@v2
         with:
-          files: Char-Factory-${{ github.ref_name }}-windows.zip
+          files: Char-Factory-*
           generate_release_notes: true

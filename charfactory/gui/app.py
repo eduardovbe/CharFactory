@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QFile
                                QTableWidget, QTableWidgetItem, QTabWidget, QToolBar, QTreeWidget,
                                QToolButton, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .. import archive, i18n
+from .. import archive, i18n, osutil
 from ..project import ProjectError
 from ..tools import generate, ops, runner
 from . import dialogs, fonts, theme as themes
@@ -1673,9 +1673,13 @@ class MainWindow(QMainWindow):
         started = time.time()
         # a saída do console do motor (o Ikemen avisa ali dos parâmetros e sons do personagem)
         # vai para o painel, sem abrir uma janela de console
-        proc = subprocess.Popen(args, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace",
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            proc = subprocess.Popen(osutil.command(args), cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+                                    creationflags=osutil.no_window_flags())
+        except OSError as e:
+            QMessageBox.warning(self, title, str(e))
+            return
         lines: queue.SimpleQueue = queue.SimpleQueue()
         reader = threading.Thread(target=lambda: [lines.put(ln.rstrip()) for ln in proc.stdout], daemon=True)
         reader.start()
@@ -2002,8 +2006,7 @@ class MainWindow(QMainWindow):
     def apply_ui_font() -> None:
         from PySide6.QtGui import QFontDatabase
         fonts.load()      # registrar fontes depois repõe a fonte padrão nos widgets: antes de tudo
-        family = "Segoe UI Variable Text" if "Segoe UI Variable Text" in QFontDatabase.families() else "Segoe UI"
-        f = QFont(family)
+        f = QFont(fonts.ui_family())
         f.setPointSizeF(fonts.ui_size())
         app = QApplication.instance()
         app.setFont(f)

@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .. import osutil
 from ..formats import sff as sffmod
 from ..project import Character
 from .. import project
@@ -25,7 +26,7 @@ def find_mugen_exe(root: str | Path) -> Path:
     root = Path(root)
     if (root / "mugen.exe").exists():
         return root / "mugen.exe"
-    exes = [p for p in root.glob("*.exe") if "mugen" in p.name.lower()
+    exes = [p for p in osutil.executables(root, "mugen") if p.suffix.lower() == ".exe"
             and not any(k in p.name.lower() for k in ("setup", "unins", "stagen", "config"))]
     if not exes:
         raise FileNotFoundError(tr("no MUGEN executable in {0}").format(root))

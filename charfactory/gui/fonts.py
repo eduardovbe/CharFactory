@@ -68,10 +68,22 @@ def scale_qss(qss: str, scale: float) -> str:
     return _PT.sub(lambda m: f"{float(m.group(1)) * scale:.1f}pt", qss)
 
 
+def ui_family() -> str:
+    """Fonte da interface: a Segoe UI no Windows; nos outros sistemas, a fonte padrão deles
+    (San Francisco no macOS, a do ambiente gráfico no Linux)."""
+    families = QFontDatabase.families()
+    for name in ("Segoe UI Variable Text", "Segoe UI"):
+        if name in families:
+            return name
+    return QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+
+
 def code_font(size: float | None = None) -> QFont:
     load()
-    family = CODE_FAMILY if CODE_FAMILY in QFontDatabase.families() else "Consolas"
-    f = QFont(family)
+    if CODE_FAMILY in QFontDatabase.families():
+        f = QFont(CODE_FAMILY)
+    else:
+        f = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
     f.setPointSizeF(code_size() if size is None else size)
     f.setStyleHint(QFont.StyleHint.Monospace)
     f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)

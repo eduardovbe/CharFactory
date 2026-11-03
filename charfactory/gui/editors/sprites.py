@@ -1,8 +1,6 @@
 """Editor de sprites: painel 'Sprites' | canvas com réguas | painel 'Paletas'."""
 from __future__ import annotations
 
-import os
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -14,6 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QInputDialog, QLabel, QListWidget, QListWidgetItem, QMessageBox,
                                QSlider, QSpinBox, QSplitter, QToolButton, QVBoxLayout, QWidget)
 
+from ... import osutil
 from ...tools import edit, ops, render
 from ..canvas import SpriteCanvas, pil_to_qimage
 from ..context import AppContext
@@ -1029,9 +1028,9 @@ class SpriteEditor(QWidget):
         exe = self.ctx.settings.get("image_editor")
         try:
             if exe:
-                subprocess.Popen([exe, key])
+                osutil.open_with(exe, key)
             else:
-                os.startfile(key)  # noqa: S606 — programa padrão do Windows para PNG
+                osutil.open_path(key)    # programa padrão do sistema para PNG
         except (OSError, AttributeError) as e:
             QMessageBox.warning(self, tr("External editor"), tr("Could not open {0}: {1}").format(key, e))
             return

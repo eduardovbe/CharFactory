@@ -26,7 +26,8 @@ _catalog: dict[str, str] = {}
 
 
 def settings_path() -> Path:
-    return Path(os.environ.get("APPDATA", Path.home())) / "charfactory" / "config.json"
+    from .osutil import config_dir
+    return config_dir() / "config.json"
 
 
 def saved_language() -> str | None:

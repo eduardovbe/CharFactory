@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <b><a href="../../releases/latest">Download for Windows</a></b> ·
+  <b><a href="../../releases/latest">Download for Windows, macOS and Linux</a></b> ·
   <a href="#ai-agents-and-mcp">AI and MCP</a> ·
   <a href="#what-makes-it-different">What makes it different</a> ·
   <a href="#the-editors">The editors</a> ·
@@ -29,9 +29,15 @@
 
 ## Get started
 
-1. Download `Char-Factory-...-windows.zip` from the **[latest release](../../releases/latest)**.
-2. Extract it anywhere and open **`Char Factory.exe`**. Nothing to install.
+1. Download the file for your system from the **[latest release](../../releases/latest)**:
+   `-windows.zip`, `-macos.zip` (Apple Silicon) or `-linux.tar.gz`.
+2. Extract it anywhere and open **`Char Factory`** (`Char Factory.exe` on Windows,
+   `Char Factory.app` on macOS). Nothing to install.
 3. Open a character's `.def`, or drop a `.def`, `.zip`, `.rar` or `.7z` on the window.
+
+On macOS the app is not signed: the first time, right-click it and choose **Open**. MUGEN only
+exists for Windows, so on macOS and Linux it runs through [Wine](https://www.winehq.org/); Ikemen GO
+runs natively. To open `.rar` and `.7z` there, install 7-Zip (`7z`/`7zz`) or `bsdtar`.
 
 The first launch asks for the language and the theme. If the character lives inside your MUGEN or
 Ikemen GO folder, **Run in the engine** (<kbd>Ctrl</kbd>+<kbd>R</kbd>) finds that engine by itself;
@@ -153,7 +159,8 @@ client speaks Streamable HTTP to `http://127.0.0.1:47913/mcp` with the header
    loads the models into the list. Claude defaults to `claude-opus-5-5`.
 4. Open the panel with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd> and ask.
 
-The key is stored in the Windows Credential Manager, never in the settings file. Without a saved
+The key is stored in the system vault (Windows Credential Manager, macOS Keychain, or the Secret
+Service through `secret-tool` on Linux), never in the settings file. Without a saved
 key, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY` is used. With Claude, the assistant
 caches the prompt and thinks adaptively, so long editing sessions stay fast and cheap.
 

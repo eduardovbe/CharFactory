@@ -8,6 +8,7 @@ import shutil
 from functools import cached_property
 from pathlib import Path
 
+from . import osutil
 from .formats import air, cmd, cns, mtext, sff, snd, zssread
 from .i18n import tr
 
@@ -62,6 +63,7 @@ class Character:
             if search_data:
                 candidates += [self.mugen_root / "data" / rel]
         for c in candidates:
+            c = osutil.find_case(c)
             if c.exists():
                 return c
         return candidates[0]

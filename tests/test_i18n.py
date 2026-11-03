@@ -58,7 +58,7 @@ def test_switching_language_translates(lang):
 
 
 def test_language_choice_order(monkeypatch, tmp_path):
-    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("CHARFACTORY_CONFIG_HOME", str(tmp_path))
     monkeypatch.delenv("CHARFACTORY_LANG", raising=False)
     monkeypatch.setattr(i18n, "system_language", lambda: "es")
     assert i18n.resolve_language() == "es"                       # sem escolha salva: o do sistema
@@ -114,7 +114,7 @@ def test_first_run_picks_language_and_theme_with_clicks(monkeypatch, tmp_path, l
     from PySide6.QtWidgets import QApplication
 
     from charfactory.gui import firstrun
-    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("CHARFACTORY_CONFIG_HOME", str(tmp_path))
     QApplication.instance() or QApplication([])
     assert firstrun.needed()
     dlg = firstrun.FirstRunDialog()

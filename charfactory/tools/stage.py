@@ -16,6 +16,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw
 
+from .. import osutil
 from ..formats import air, mtext, sff
 from ..i18n import tr
 
@@ -125,8 +126,9 @@ class Stage:
             return None
         rel = rel.replace("\\", "/")
         for base in [self.path.parent, *( [self.mugen_root, self.mugen_root / "stages"] if self.mugen_root else [])]:
-            if (base / rel).exists():
-                return base / rel
+            p = osutil.find_case(base / rel)
+            if p.exists():
+                return p
         return self.path.parent / Path(rel).name
 
     @property

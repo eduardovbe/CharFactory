@@ -14,6 +14,7 @@ import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+from .. import osutil
 from ..project import Character, find_mugen_root
 from ..i18n import tr
 
@@ -50,19 +51,21 @@ def config_problem(root: Path, engine: str) -> str | None:
 
 
 def is_ikemen(root: str | Path) -> bool:
-    """Pasta do Ikemen GO: tem o Ikemen_GO.exe ou os scripts dele (external/script/main.lua)."""
+    """Pasta do Ikemen GO: tem o executável dele (Ikemen_GO.exe, Ikemen_GO_Linux, Ikemen_GO.app…)
+    ou os scripts dele (external/script/main.lua)."""
     root = Path(root)
-    return any("ikemen" in p.name.lower() for p in root.glob("*.exe")) or \
-        (root / "external" / "script" / "main.lua").exists()
+    return bool(osutil.executables(root, "ikemen")) or (root / "external" / "script" / "main.lua").exists()
 
 
 def find_ikemen_exe(root: str | Path) -> Path:
-    """Ikemen_GO.exe ou outro nome com 'ikemen' (ex.: Ikemen_GO_x64.exe)."""
-    exes = [p for p in Path(root).glob("*.exe") if "ikemen" in p.name.lower()
-            and not any(k in p.name.lower() for k in ("setup", "unins", "prev"))]
-    if not exes:
+    """O executável do Ikemen GO: o nativo do sistema (Ikemen_GO_Linux, Ikemen_GO_MacOS ou o de
+    dentro do Ikemen_GO.app), senão Ikemen_GO.exe ou outro .exe com 'ikemen' (ex.: Ikemen_GO_x64.exe)."""
+    found = [p for p in osutil.executables(root, "ikemen")
+             if not any(k in p.name.lower() for k in ("setup", "unins", "prev"))]
+    if not found:
         raise FileNotFoundError(tr("no Ikemen GO executable in {0}").format(root))
-    return sorted(exes, key=lambda p: len(p.name))[0]
+    native = [p for p in found if p.suffix.lower() != ".exe"]
+    return sorted(native or found, key=lambda p: len(p.name))[0]
 
 
 def engine_exe(root: str | Path) -> tuple[Path, str]:
@@ -223,9 +226,8 @@ def gui_settings() -> dict:
     """As opções gravadas pela janela (perfis, pastas do MUGEN e do Ikemen), para a linha de
     comando e a IA rodarem com os mesmos perfis."""
     import json
-    import os
     try:
-        path = Path(os.environ.get("APPDATA", Path.home())) / "charfactory" / "config.json"
+        path = osutil.config_dir() / "config.json"
         return json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
         return {}
@@ -297,7 +299,7 @@ def run(char: Character, opponent: str | None = None, stage: str | None = None,
         args = engine_args(exe, char_argument(char, root, engine), opponent, stage or default_stage(root),
                            p1_ai, p2_ai, rounds)
     started = time.time()
-    proc = subprocess.Popen(args, cwd=root)
+    proc = subprocess.Popen(osutil.command(args), cwd=root)
     time.sleep(watch_seconds)
     result = {"engine": engine, "pid": proc.pid, "args": args[1:], "running": proc.poll() is None,
               "exit_code": proc.poll()}

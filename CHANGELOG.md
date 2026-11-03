@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- macOS and Linux support, with downloads for both in the release.
+- Native Ikemen GO on macOS and Linux; MUGEN runs through Wine.
+- API keys in the macOS Keychain and in the Linux Secret Service.
+
+### Fixed
+
+- Character files whose case differs from the `.def` now open on Linux.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added

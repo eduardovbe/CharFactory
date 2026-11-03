@@ -4,8 +4,8 @@ O arquivo é extraído para
 uma pasta (por padrão `chars/<nome>` do MUGEN) e aberto como um projeto normal; `pack`
 faz o caminho inverso para distribuir o personagem.
 
-ZIP usa a biblioteca padrão. RAR e 7z usam o 7-Zip, se instalado, ou o `tar.exe` do Windows
-(libarchive). Entradas com caminho absoluto ou `..` são recusadas antes de extrair.
+ZIP usa a biblioteca padrão. RAR e 7z usam o 7-Zip, se instalado, ou o tar do sistema que lê
+esses formatos (libarchive): o `tar.exe` do Windows, o `tar` do macOS ou o `bsdtar` do Linux. Entradas com caminho absoluto ou `..` são recusadas antes de extrair.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from . import osutil
 from .formats import mtext
 from .project import ProjectError, find_mugen_root
 from .i18n import tr
@@ -24,15 +25,21 @@ ARCHIVE_SUFFIXES = (".zip", ".rar", ".7z")
 
 
 def _seven_zip() -> str | None:
-    for p in (shutil.which("7z"), r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"):
+    found = [shutil.which(n) for n in ("7z", "7zz", "7za")]
+    if osutil.IS_WIN:
+        found += [r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"]
+    for p in found:
         if p and Path(p).exists():
             return p
     return None
 
 
 def _system_tar() -> str | None:
-    p = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
-    return str(p) if p.exists() else None
+    """Um tar que abre RAR e 7z (libarchive). O GNU tar do Linux não abre: só o bsdtar."""
+    if osutil.IS_WIN:
+        p = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe"
+        return str(p) if p.exists() else None
+    return shutil.which("bsdtar") or (shutil.which("tar") if osutil.IS_MAC else None)
 
 
 def _safe_name(name: str) -> bool:
@@ -70,7 +77,9 @@ def list_entries(archive: str | Path) -> list[str]:
         if out.returncode:
             raise ProjectError(tr("tar could not read {0}: {1}").format(archive.name, out.stderr.strip()[:300]))
         return [n for n in out.stdout.splitlines() if n and not n.endswith("/")]
-    raise ProjectError(tr("to open {0}, install 7-Zip (or use Windows 10+ tar.exe)").format(archive.suffix))
+    if osutil.IS_WIN:
+        raise ProjectError(tr("to open {0}, install 7-Zip (or use Windows 10+ tar.exe)").format(archive.suffix))
+    raise ProjectError(tr("to open {0}, install 7-Zip (7z) or bsdtar (libarchive)").format(archive.suffix))
 
 
 def _extract_all(archive: Path, dest: Path) -> None:

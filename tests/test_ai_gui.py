@@ -23,7 +23,7 @@ STATE = "[Statedef 777]\ntype = S\nanim = 0\n\n[State 777, end]\ntype = ChangeSt
 
 @pytest.fixture()
 def gui(tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("CHARFACTORY_CONFIG_HOME", str(tmp_path / "appdata"))
     app = QApplication.instance() or QApplication([])
     from charfactory.gui.app import MainWindow
     from charfactory.gui.context import AppContext
