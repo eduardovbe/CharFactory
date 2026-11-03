@@ -24,7 +24,7 @@
   <a href="#command-line">Command line</a> ·
   <a href="#development">Development</a>
   <br>
-  <sub><b>English</b> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a> · <a href="README.pt-BR.md">Português (Brasil)</a> · <a href="README.zh-CN.md">简体中文</a></sub>
+  <img src="https://flagcdn.com/24x18/us.png" width="24" height="18" alt="English"> <b>English</b> &nbsp;·&nbsp; <a href="README.es.md"><img src="https://flagcdn.com/24x18/es.png" width="24" height="18" alt="Español"> Español</a> &nbsp;·&nbsp; <a href="README.fr.md"><img src="https://flagcdn.com/24x18/fr.png" width="24" height="18" alt="Français"> Français</a> &nbsp;·&nbsp; <a href="README.pt-BR.md"><img src="https://flagcdn.com/24x18/br.png" width="24" height="18" alt="Português (Brasil)"> Português (Brasil)</a> &nbsp;·&nbsp; <a href="README.zh-CN.md"><img src="https://flagcdn.com/24x18/cn.png" width="24" height="18" alt="简体中文"> 简体中文</a>
 </p>
 
 ## Get started
