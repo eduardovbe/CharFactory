@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
+### Added
+
+- Palettes: "Other palette" tab to open a palette or image and copy colors between the two.
+- Onion skin button in the toolbar, with opacity.
+- Animations: automatic boxes on all frames at once, as collision or damage, anatomical or rectangle.
+- New animation window: frame time, automatic boxes and an optional sprite group.
+- Interface in French and Simplified Chinese.
+- README in Spanish, French, Portuguese (Brazil) and Simplified Chinese.
+- Text size for the interface and the code, in Options and in View › Text size (Ctrl+Alt+= / Ctrl+Alt+-).
+
+### Changed
+
+- Animations: the frame is split into "Current frame" and "Position", below the animation.
+- Onion skin starts off.
+- Opening a palette no longer replaces the current one.
+
+### Fixed
+
+- At 1366 px wide the toolbar tools (zoom, guides, boxes) no longer disappear.
+- Editor names no longer vanish from the toolbar on the Animations tab.
+
 ## [0.4.6] - 2026-10-30
 
 ### Changed
@@ -274,7 +297,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/eduardovbe/CharFactory/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/eduardovbe/CharFactory/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/eduardovbe/CharFactory/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/eduardovbe/CharFactory/compare/v0.3.0...v0.4.0
