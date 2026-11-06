@@ -14,7 +14,48 @@ from . import simulate
 from ..i18n import tr
 
 ROWS = [("quadros", tr("Frames")), ("fases", tr("Frame data")), ("acertos", tr("Hits")),
-        ("sons", tr("Sounds")), ("efeitos", tr("Effects")), ("tela", tr("Screen and color"))]
+        ("p2", tr("P2")), ("sons", tr("Sounds")), ("efeitos", tr("Effects")),
+        ("tela", tr("Screen and color"))]
+
+# situação do P2 em cada tick (faixa "P2"): rótulo e explicação
+P2_STATUS = {"p2_shake": (tr("shake"), tr("hit shake: P2 frozen by the hit (pausetime, 2nd value)")),
+             "p2_stun": (tr("hitstun"), tr("hitstun: P2 sliding back until HitOver (ground.hittime)")),
+             "p2_guard": (tr("guard"), tr("guard stun: P2 blocking (guard.hittime)")),
+             "p2_air": (tr("air"), tr("knocked into the air / falling")),
+             "p2_down": (tr("down"), tr("P2 lying down")),
+             "p2_state": (tr("custom"), tr("P2 in a state of the attacker (p2stateno / TargetState)"))}
+
+
+def _p2_status(p2: dict) -> str | None:
+    st = p2["state"]
+    if st == "stand":
+        return None
+    if st in ("hit", "guardhit"):
+        if p2.get("sub") == "shake" or p2.get("shake", 0) > 0:
+            return "p2_shake"
+        return "p2_stun" if st == "hit" else "p2_guard"
+    return "p2_down" if st == "down" else "p2_air"
+
+
+def p2_rows(track) -> list[dict]:
+    """Trechos da faixa P2: tremor, recuo, defesa, no ar e no chão, e o tick em que volta."""
+    out: list[dict] = []
+    for i, r in enumerate(track):
+        k = _p2_status(r["p2"])
+        if out and out[-1]["kind"] == k and out[-1]["i1"] == i:
+            out[-1]["i1"] = i + 1
+            continue
+        if k is not None:
+            out.append({"i0": i, "i1": i + 1, "kind": k, "text": P2_STATUS[k][0], "t": r["t"]})
+        elif out and out[-1]["kind"] != "p2_free" and out[-1]["i1"] == i:
+            # voltou ao parado: o combo acaba aqui
+            out.append({"i0": i, "i1": i + 1, "kind": "p2_free", "text": "▲", "t": r["t"]})
+    for it in out:
+        n = it["i1"] - it["i0"]
+        it["tip"] = (tr("P2 recovered (back to idle) at tick {0}: a hit after this starts a new combo").format(it["t"])
+                     if it["kind"] == "p2_free" else
+                     P2_STATUS[it["kind"]][1] + tr(" · {0} tick(s)").format(n))
+    return out
 
 # o que muda a leitura do golpe na tela (o resto dos eventos "ctrl" é movimento e regra)
 VISUAL = {"envshake", "palfx", "bgpalfx", "allpalfx", "envcolor", "afterimage", "superpause",
@@ -75,10 +116,13 @@ def build(sim: simulate.Sim) -> dict:
         kind, value = e["kind"], e.get("value")
         if kind in ("acerto", "defesa"):
             row = "acertos"
-            item.update(kind=kind, text="✕" if kind == "acerto" else "▣",
+            combo = e.get("combo")
+            item.update(kind=kind, text=(f"✕{combo}" if combo else "✕") if kind == "acerto" else "▣",
                         tip=(tr("hit") if kind == "acerto" else tr("guard")) + f" [State {e['label']}]"
+                            + (tr(" · combo {0}").format(combo) if combo else "")
                             + (tr(" · damage {0}").format(e['damage']) if e.get("damage") else "")
-                            + (tr(" · pause {0},{1}").format(e['pause'][0], e['pause'][1]) if e.get("pause") else ""))
+                            + (tr(" · pause {0},{1}").format(e['pause'][0], e['pause'][1]) if e.get("pause") else "")
+                            + (tr(" · hittime {0}").format(e['hittime']) if e.get("hittime") is not None else ""))
             if e.get("snd"):
                 g, n, common = e["snd"]
                 rows["sons"].append({**item, "kind": "som", "text": f"{'F' if common else ''}{g},{n}",
@@ -109,7 +153,8 @@ def build(sim: simulate.Sim) -> dict:
             continue
         rows[row].append(item)
 
-    marks = [it["i1"] for k in ("acertos", "sons", "efeitos", "tela") for it in rows[k]]
+    rows["p2"] = p2_rows(track)
+    marks = [it["i1"] for k in ("acertos", "p2", "sons", "efeitos", "tela") for it in rows[k]]
     free = next((i for i, ph in enumerate(fd["phases"]) if ph == "livre"), len(track))
     end = min(len(track), max([free, *marks]) + 12)
     return {"ticks": len(track), "end": end, "phases": fd["phases"], "frame_data": fd, "rows": rows}

@@ -198,25 +198,44 @@ class Parser:
         """O gatilho depois do redirecionamento (pode ter operadores unários, não binários)."""
         return self.unary()
 
+    def old_compare(self):
+        """A 2ª comparação das formas antigas (AnimElem = n, TimeMod = n, ProjHit = n), como o
+        evaluateComparison do Ikemen: a vírgula é opcional (`AnimElem = 9 = 21` compara o
+        AnimElemTime(9) com 21) e sem operador depois da vírgula vale "="."""
+        comma = self.peek()[1] == ","
+        if comma:
+            self.take(",")
+        if self.peek()[1] in ("=", "!=", "<", "<=", ">", ">="):
+            op = self.take()[1]
+        elif comma:
+            op = "="
+        else:
+            return None, None, False
+        return op, self.expr(7), comma
+
     def after_name(self, name):
         # formas especiais
         if name == "animelem" and self.peek()[1] == "=":
             self.take("=")
             n = self.expr(7)                      # acima de = e !=
-            if self.peek()[1] == ",":
-                self.take(",")
-                op = "="
-                if self.peek()[1] in ("=", "!=", "<", "<=", ">", ">="):
-                    op = self.take()[1]
-                m = self.expr(7)
-                return ("animelem", n, op, m)
-            return ("animelem", n, None, None)
+            op, m, _ = self.old_compare()
+            return ("animelem", n, op, m)
+        # forma antiga dos projéteis (Ikemen, compiler.go): ProjHit[ID] = 0|1[, [op] t] vira
+        # ProjHitTime(ID) = 0 (sem a 2ª parte) ou ProjHitTime(ID) >= 0 && ProjHitTime(ID) op t;
+        # "= 0" nega o resultado
+        old = re.fullmatch(r"(projhit|projguarded|projcontact)(\d*)", name)
+        if old and self.peek()[1] == "=":
+            self.take("=")
+            n = self.expr(7)
+            op, m, comma = self.old_compare()
+            return ("projold", old.group(1) + "time", int(old.group(2) or 0), n, op, m, comma)
         if name == "timemod" and self.peek()[1] == "=":
             self.take("=")
             d = self.expr(7)
-            self.take(",")
-            r = self.expr(7)
-            return ("timemod", d, r)
+            op, r, _ = self.old_compare()
+            if op is None:
+                raise Unsupported(tr("TimeMod without a comparison in {0!r}").format(self.text))
+            return ("timemod", d, op, r)
         if name in LETTERS and self.peek()[1] in ("=", "!="):
             op = self.take()[1]
             letter = self.take()[1]
@@ -362,9 +381,19 @@ def _ev(n, ctx):
             return 0
         m = _ev(n[3], ctx)
         return _ev(("bin", n[2], ("num", t), ("num", m)), ctx)
+    if k == "projold":
+        _, trig, pid, want, op, m, comma = n
+        t = ctx.trigger(trig, pid)
+        if op is None:
+            r = t == 0
+        else:                                   # só a forma com vírgula exige contato (t >= 0)
+            r = (t >= 0 or not comma) and bool(_ev(("bin", op, ("num", t), ("num", _ev(m, ctx))), ctx))
+        return _b(r if _ev(want, ctx) else not r)
     if k == "timemod":
-        d, r = _ev(n[1], ctx), _ev(n[2], ctx)
-        return _b(d != 0 and ctx.trigger("time", None) % d == r)
+        d, op, r = _ev(n[1], ctx), n[2], _ev(n[3], ctx)
+        if d == 0:
+            return 0
+        return _ev(("bin", op, ("num", _mod(ctx.trigger("time", None), d)), ("num", r)), ctx)
     if k == "letter":
         v = ctx.trigger(n[1], None)
         return _b((v == n[3]) == (n[2] == "="))

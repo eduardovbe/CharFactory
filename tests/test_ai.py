@@ -620,5 +620,5 @@ def test_api_keys_go_to_the_credential_manager():
 def test_problems_have_english_codes_and_translated_messages(host):
     tools.run(host, "set_animation", {"text": ANIM})
     _json(host, "set_state", number=200, text=STATE)          # caixa de ataque, mas nenhum HitDef
-    probs = _json(host, "simulate_state", number=200, distance=300)["problems"]
-    assert {"kind": "no-hit", "message": "no hit on the dummy at 300 px"} in probs
+    probs = _json(host, "simulate_state", number=200, distance=200)["problems"]
+    assert {"kind": "no-hit", "message": "no hit on the dummy at 200 px"} in probs

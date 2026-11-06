@@ -1333,7 +1333,7 @@ def test_simulator_chain_field_runs_a_combo(gui):
         app.processEvents()
     assert sp.sim.chain == (400, 400, 410)
     text = sp.fd_label.text()
-    assert "cancel" in text and "combo of <b>2</b>" in text
+    assert "cancel" in text and "combo of <b>3</b>" in text
 
 
 def test_simulator_compares_with_a_backup_side_by_side(gui):

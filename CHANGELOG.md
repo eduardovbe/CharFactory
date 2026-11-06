@@ -12,10 +12,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - macOS and Linux support, with downloads for both in the release.
 - Native Ikemen GO on macOS and Linux; MUGEN runs through Wine.
 - API keys in the macOS Keychain and in the Linux Secret Service.
+- Simulator: P2 row in the timeline (hit shake, hitstun, guard, air, down) and the combo count on each hit.
+- Simulator: `Projectile` controller (projhits, projmisstime, hit and remove anims, screen edges, `ProjHitTime`).
+- Simulator: juggle points (`juggle`, `air.juggle`, `airjuggle`).
+- Simulator: throws and grabs; P2 runs the attacker's state (`p2stateno`, `TargetState`) until `SelfState`.
+- Simulator: `BindToTarget`, `TargetFacing`, `TargetVelAdd`, `PosFreeze`, `AttackMulSet`, `TargetLifeAdd` and Explod `friction`.
+- Simulator: `ModifyExplod`, `ExplodBindTime`, `Width`, `HitAdd`, `AngleAdd`, `AngleMul` and `PowerSet`.
+- Simulator: air guard (154/155) with `airguard.velocity` and `airguard.ctrltime`.
+- Simulator: screen edges and camera; players stay on screen and `BackEdgeDist`, `FrontEdgeDist`, `ScreenPos` and `ScreenBound` work.
 
 ### Fixed
 
 - Character files whose case differs from the `.def` now open on Linux.
+- Simulator: P2 hitstun and guard stun last as long as in Ikemen GO, so multi-hit supers count as one combo (#11).
+- Simulator: a state entered during hitpause runs its `Time = 0` once, fixing projectiles that never stopped hitting (#11).
+- Simulator: HitDef `numhits`, `chainid`, `nochainid` and `hitflag` `+`/`-`.
+- Simulator: air hits and knockdowns follow common1 (HitDef `yaccel`, air recovery, bounce, `liedown.time`, get up).
+- Simulator: `P2BodyDist X` uses the size boxes, and `P2StateType` sees a crouching P2.
+- Simulator: WinMUGEN characters pause 1 tick less on hit and round distances down.
+- Simulator: HitDef `p1stateno`, `p1facing`, `p2facing`; Statedef `hitdefpersist`, `movehitpersist`, `hitcountpersist`.
+- Simulator: `TargetVelSet` sign, `TargetBind` time, `supermovetime` vs `pausemovetime`, helpers landing in state 52.
+- Simulator: `AnimElem` at the end of an animation in MUGEN characters (no early loop on `AnimTime = 0`).
+- Simulator: Explod, Helper and Projectile `postype` (front/back by facing, p2 binding and facing, none).
+- Simulator: damage after a knockdown uses `fall.defence_up`, at least 1 and never more than the life left.
+- Simulator: bodies push with the size boxes only, as in Ikemen GO (no Clsn2 needed, also when lying down).
+- Simulator: version rules follow `ikemenversion` in the `.def`, not the ZSS format.
+- Simulator: `GetHitVar(xvel)` in world space, and `animtype`, `groundtype`, `airtype` on P2.
+- Simulator: old trigger forms `AnimElem = 9 = 21`, `TimeMod = 4 = 0` and `ProjHit1330 = 1, < 10`.
+- Simulator: `EnemyNear, Anim` and `EnemyNear, Vel X` relative to P2's facing.
+- Simulator: juggle rules for projectiles and Ikemen characters.
 
 ## [0.5.0] - 2026-11-03
 

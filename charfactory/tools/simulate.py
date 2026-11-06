@@ -13,9 +13,15 @@ comandos, teclas, custo de energia, travamento).
 Semântica conferida no Ikemen GO (src/char.go, src/bytecode.go; MIT):
 - Explod `postype = p2`: herda o facing do oponente e o `pos x` é multiplicado por ele;
 - velocidade do acerto no mundo: `-ground.velocity.x × facing do atacante`;
-- helper: desenhado na escala `size.xscale/yscale`.
-Aproximações (anotadas no relatório quando usadas): física de queda simples, sem juggle,
-sem defesa, sem projéteis (`Projectile`), comandos sempre falsos (o golpe é forçado).
+- helper: desenhado na escala `size.xscale/yscale`;
+- o oponente segue o common1: tremor, recuo e HitOver (hittime + 1 em char MUGEN), voo com o
+  yaccel do HitDef, recuperação no ar (5040), queda, quique (5100/5101), deitado liedown.time
+  (5110) e levantar (5120); juggle pelo airjuggle; projéteis (`Projectile`) com projhits,
+  projmisstime, hitpause próprio e bordas da tela.
+- câmera e bordas da tela (camera.go sem zoom: tension 50, screenleft/right 15, P1 e P2 presos
+  à tela); regras de versão pelo ikemenversion do .def (um ZSS sem ele segue as de char MUGEN).
+Aproximações (anotadas no relatório quando usadas): o oponente não ataca nem anda sozinho,
+palco sem fim (sem canto nem cornerpush), comandos sempre falsos (o golpe é forçado).
 """
 from __future__ import annotations
 
@@ -100,6 +106,13 @@ _REDIR_END = re.compile(r"(?i)(?<![\w.])(helper|enemynear|enemy|target|playerid|
 
 # --------------------------------------------------------------------- entidades
 
+def _ikemen_version(char) -> bool:
+    """O .def tem ikemenversion (maior ou menor diferente de zero), como o gi.ikemenver."""
+    v = str(char.info("ikemenversion", "") or "").split(";")[0].strip()
+    nums = [int(m) for m in re.findall(r"\d+", v)[:2]]
+    return any(nums)
+
+
 @dataclass
 class Entity:
     sim: "Sim"
@@ -150,8 +163,16 @@ class Entity:
     started: bool = False                # já passou pelo 1º tick (o tempo avança no começo dos seguintes)
     frozen: bool = False                 # pausa do acerto neste tick
     hit_now: bool = False                # acertou neste tick (movehit vira 1 no fim do tick)
+    # trocou de estado/anim durante a pausa do acerto: o Ikemen roda o Time = 0 (e o 1º tick da
+    # anim) no 1º tick fora da pausa, e só então o tempo sobe
+    hold_time: bool = False
+    hold_anim: bool = False
+    juggle: int = 0                      # custo de juggle do estado (Statedef juggle)
+    proj: dict | None = None             # projétil (controlador Projectile): estado dele
+    proj_contact: dict | None = None     # último contato de um projétil deste dono
     prevstateno: int = 0
     power: int = 3000
+    screenbound: tuple = (True, True)    # ScreenBound (preso à tela, move a câmera em x) deste tick
 
     # ---- contexto do avaliador
     @property
@@ -192,13 +213,13 @@ class Entity:
         if name == "vel y":
             return self.vel[1]
         if name == "p2dist x":
-            return (s.p2.pos[0] - self.pos[0]) * self.facing
+            return s.dist_round((s.p2.pos[0] - self.pos[0]) * self.facing)
         if name == "p2dist y":
-            return s.p2.pos[1] - self.pos[1]
+            return s.dist_round(s.p2.pos[1] - self.pos[1])
         if name == "p2bodydist x":
-            return (s.p2.pos[0] - self.pos[0]) * self.facing - s.body_w
+            return s.dist_round(s.body_dist_x(self))
         if name == "p2bodydist y":
-            return s.p2.pos[1] - self.pos[1]
+            return s.dist_round(s.p2.pos[1] - self.pos[1])
         if name == "facing":
             return self.facing
         if name == "var":
@@ -213,6 +234,10 @@ class Entity:
             return self.locals.get(int(arg), 0)
         if name == "gethitvar":                   # o P1 simulado não apanha
             return 0
+        if name in ("hitshakeover", "hitover"):   # sem acerto: o tremor e o acerto já acabaram
+            return 1
+        if name in ("hitfall", "canrecover"):
+            return 0
         if name == "random":
             return s.random()
         if name in ("movehit", "movecontact"):    # ticks desde o acerto (1 no 1º; parado na pausa)
@@ -223,6 +248,16 @@ class Entity:
             return 0
         if name == "hitcount" or name == "uniqhitcount":
             return self.hitcount
+        if name in ("projhittime", "projcontacttime", "projguardedtime"):
+            pc = self.proj_contact
+            want = {"projhittime": ("hit",), "projguardedtime": ("guard",),
+                    "projcontacttime": ("hit", "guard")}[name]
+            if pc is None or pc["type"] not in want or (arg and pc["id"] != arg):
+                return -1
+            return s.tick - pc["t"] - 1
+        if name in ("numproj", "numprojid"):
+            return sum(1 for q in s.projs if q.alive and q.parent is self and q.proj["status"] == "active"
+                       and (name == "numproj" or q.proj["id"] == arg))
         if name == "numtarget":
             return 1 if (self.movehit or (self.root and self.root.movehit)) and s.p2.state != "stand" else 0
         if name == "numhelper":
@@ -246,9 +281,9 @@ class Entity:
         if name in ("statetype", "movetype", "physics"):
             return getattr(self, name)
         if name == "p2statetype":
-            return "A" if s.p2.pos[1] < 0 else ("L" if s.p2.state == "down" else "S")
+            return s.p2.stype()
         if name == "p2movetype":
-            return "H" if (s.p2.state != "stand" or s.p2.custom) else "I"
+            return "H" if s.p2.movetype_h() else "I"
         if name == "p2stateno":
             return s.p2.state_no()
         if name == "power":
@@ -259,10 +294,8 @@ class Entity:
             return 1000
         if name in ("hitpausetime",):
             return self.hitpause
-        if name in ("backedgedist", "frontedgedist", "backedgebodydist", "frontedgebodydist"):
-            return 200
-        if name == "screenpos x":
-            return 160
+        if name in EDGE_TRIGGERS:
+            return s.edge_trigger(self, name)
         if name == "screenpos y":
             return 200
         if name in ("animexist", "selfanimexist"):
@@ -279,12 +312,8 @@ class Entity:
             return math.pi
         if name == "e":
             return math.e
-        if name == "camerapos x":
-            return 0.0
         if name == "camerapos y":
             return 0.0
-        if name in ("leftedge", "rightedge"):          # bordas da tela em coordenadas do palco
-            return -160 if name == "leftedge" else 160
         if name in ("topedge", "bottomedge"):
             return -200 if name == "topedge" else 40
         if name in ("parentdist x", "rootdist x"):
@@ -377,10 +406,12 @@ class Entity:
         if not a or not a.frames:
             return t
         total = a.total_time
-        if clock and self.sim.ikemen:
+        if clock:
             # Ikemen (anim.go, Action): no tick em que AnimTime = 0 o quadro já voltou ao laço,
             # mas o curtime (o relógio do AnimElem) só volta no passo seguinte; por isso
-            # AnimElem = 1 não dispara de novo na volta (medido com o log por tick)
+            # AnimElem = 1 não dispara de novo na volta (medido com o log por tick). O anim.go
+            # não olha a versão do char: vale para char MUGEN também (o TargetBind do quadro 1
+            # do arremesso do kfm puxava o P2 de volta no tick do AnimTime = 0)
             if total > 0 and t > total and all(f.time > 0 for f in a.frames):
                 ls = a.loopstart or 0
                 pre = sum(f.time for f in a.frames[:ls])
@@ -465,6 +496,54 @@ class Explod:
     pausemove: int = 0
     on_hit: bool = False
     alpha: tuple | None = None           # alpha = s,d do Explod (com trans = addalpha)
+    move_facing: int = 1                 # lado em que a velocidade anda (o do dono, sem o facing do parâmetro)
+    anim_t0: int = 0                     # tick (e.t) em que a anim atual começou (ModifyExplod anim)
+    friction: tuple = (1.0, 1.0)
+
+
+class P2Runner(Entity):
+    """O P2 rodando um estado do atacante (HitDef p2stateno, TargetState): os controladores
+    rodam como num char, com o P1 como oponente; a posição e a velocidade são as do boneco."""
+
+    def trigger(self, name, arg):
+        s, p1, d = self.sim, self.sim.p1, self.sim.p2
+        if name == "p2dist x":
+            return s.dist_round((p1.pos[0] - self.pos[0]) * self.facing)
+        if name in ("p2dist y", "p2bodydist y"):
+            return s.dist_round(p1.pos[1] - self.pos[1])
+        if name == "p2bodydist x":
+            f, _, _ = s._size(None, False)
+            return s.dist_round((p1.pos[0] - self.pos[0]) * self.facing - 2 * f)
+        if name == "p2statetype":
+            return p1.statetype
+        if name == "p2movetype":
+            return p1.movetype
+        if name == "p2stateno":
+            return p1.stateno
+        if name in ("life", "p2life"):
+            return d.life if name == "life" else 1000
+        if name == "gethitvar":
+            return s.p2_gethitvar(arg)
+        if name in ("hitshakeover", "hitover", "hitfall"):
+            return d.trigger(name, arg)
+        if name == "hitvel x":
+            return d.hitvel[0] * self.facing
+        if name == "hitvel y":
+            return d.hitvel[1]
+        if name == "canrecover":
+            return 0
+        if name in ("numtarget", "movehit", "movecontact", "moveguarded", "hitcount"):
+            return 0
+        if name == "id":
+            return P2_ID
+        return super().trigger(name, arg)
+
+    def redirect(self, kind, arg):
+        if kind in ("enemynear", "enemy", "p2", "target"):
+            return self.sim.p1
+        if kind in ("root", "parent"):
+            return self
+        return super().redirect(kind, arg)
 
 
 @dataclass
@@ -483,9 +562,49 @@ class Dummy:
     stateno: int = 0
     vars: dict = field(default_factory=dict)
     custom: int = 0          # estado do atacante em que o boneco está (HitDef p2stateno, TargetState)
+    airguard: bool = False   # defendendo no ar (154/155)
     pose: str = "stand"      # postura parada: "stand", "crouch" ou "air" (paira no alto até apanhar)
     guard: bool = False      # defende o que o guardflag deixa
     life: int = 1000         # vida do boneco (lifemax padrão do MUGEN), para o dano do golpe
+    # acerto e defesa como o Ikemen (common1 5000/5001 e 150/151): tremor ("shake") e depois o
+    # recuo ("slide"), com o tempo do recuo (st) contado à parte; HitOver = hittime < 0
+    sub: str = ""
+    st: int = 0
+    slidetime: int = 0
+    hitvel: tuple = (0.0, 0.0)
+    combo: int = 0           # acertos seguidos sem o P2 sair do acerto
+    hitid: int = -1          # id do último HitDef que o pegou (chainid/nochainid)
+    ctrl: bool = True
+    # no ar e no chão (common1 5020/5030/5040/5050, 5100/5101/5110/5120): gravidade do HitDef
+    # (yaccel), quique (fall.yvelocity) e o tempo deitado (liedown.time)
+    yaccel: float = 0.35
+    fallvel: tuple = (None, -4.5)
+    down_rt: int = 60
+    juggle: dict = field(default_factory=dict)   # pontos de juggle que sobram por atacante (PlayerID)
+    bind: dict | None = None                     # TargetBind/BindToTarget: preso a quem, onde, quanto tempo
+    def_mul: float = 1.0                         # defesa extra depois de cair (fall.defence_up)
+    animtype: int = 0        # GetHitVar(animtype): 0 light, 1 medium, 2 hard, 3 back, 4 up, 5 diagup
+    groundtype: int = 1      # GetHitVar(groundtype/airtype): 1 high, 2 low, 3 trip
+    airtype: int = 1
+    hit_damage: int = 0
+
+    def stype(self) -> str:
+        """StateType do P2 como o motor vê (S, C, A ou L): decide o hitflag e o guardflag."""
+        if self.state == "down":
+            return "L"
+        if self.state in ("air", "fall") or self.pos[1] < 0:
+            return "A"
+        return "C" if self.pose == "crouch" else "S"
+
+    def movetype_h(self) -> bool:
+        """MoveType = H: apanhando ou defendendo (some no HitOver no ar e ao levantar)."""
+        if self.custom:
+            return True
+        if self.state == "air":
+            return not self.ctrl
+        if self.state == "down":
+            return self.sub != "getup"
+        return self.state in ("hit", "guardhit", "fall")
 
     def state_no(self) -> int:
         if self.custom:
@@ -494,7 +613,33 @@ class Dummy:
             return {"stand": 0, "crouch": 11, "air": 50}[self.pose]
         if self.state == "guardhit":
             return 152 if self.pose == "crouch" else 150
-        return {"hit": 5000, "air": 5030, "fall": 5050, "down": 5110}[self.state]
+        if self.state == "hit":
+            return (5010 if self.pose == "crouch" else 5000) + (self.sub == "slide")
+        if self.state in ("air", "fall"):
+            if self.sub == "shake":
+                return 5020 if self.pos[1] < 0 else (5010 if self.pose == "crouch" else 5000)
+            return {"fly": 5030, "recover": 5040, "falling": 5050}.get(self.sub, 5030)
+        return {"bounce": 5100, "bounce2": 5101, "getup": 5120}.get(self.sub, 5110)
+
+    def anim_no(self) -> int:
+        """Anim do P2 como o common1 escolhe: 5000 (alto) / 5010 (baixo) / 5020 (agachado) +
+        animtype no chão, 5030/5040/5050 no ar, 5100/5110/5120 no chão, 150/152/154 na defesa."""
+        sim = self._sim
+        if self.custom and sim.p2_run is not None:
+            return sim.p2_run.anim
+        if self.state == "stand":
+            return {"stand": 0, "crouch": 11, "air": 41}[self.pose]
+        if self.state == "guardhit":
+            return 154 if self.airguard else 152 if self.pose == "crouch" else 150
+        at = min(self.animtype, 2)
+        if self.state == "hit":
+            base = 5020 if self.pose == "crouch" else 5010 if self.groundtype == 2 else 5000
+            return base + at
+        if self.state in ("air", "fall"):
+            if self.sub == "shake":
+                return 5030 if self.animtype >= 3 or self.pos[1] < 0 else 5000 + at
+            return {"fly": 5030, "recover": 5040, "falling": 5050}.get(self.sub, 5030)
+        return {"bounce": 5100, "bounce2": 5101, "getup": 5120}.get(self.sub, 5110)
 
     # o boneco também responde a gatilhos redirecionados (enemynear, pos x)
     def trigger(self, name, arg):
@@ -502,23 +647,40 @@ class Dummy:
             return self.pos[0] - self._sim.origin_x
         if name == "pos y":
             return self.pos[1]
-        if name == "vel x":
-            return self.vel[0]
+        if name == "vel x":                      # relativa ao lado do P2, como a do P1
+            return self.vel[0] * self.facing
         if name == "vel y":
             return self.vel[1]
         if name == "facing":
             return self.facing
+        if name == "anim":
+            return self.anim_no()
+        if name == "gethitvar":
+            return self._sim.p2_gethitvar(arg)
+        if name in EDGE_TRIGGERS:
+            return self._sim.edge_trigger(self, name)
         if name == "stateno":
             return self.state_no()
         if name == "statetype":
-            return "A" if self.pos[1] < 0 else ("L" if self.state == "down" else
-                                                "C" if self.pose == "crouch" else "S")
+            return self.stype()
         if name == "movetype":
-            return "H" if (self.state != "stand" or self.custom) else "I"
-        if name in ("life", "lifemax"):
+            return "H" if self.movetype_h() else "I"
+        if name == "life":
+            return self.life
+        if name == "lifemax":
             return 1000
         if name == "time":
             return self.t
+        if name == "hitshakeover":
+            return int(self.state == "stand" or self.shake <= 0)
+        if name == "hitover":
+            return int(self.state == "stand" or self.hittime < 0)
+        if name == "hitfall":
+            return int(self.fall)
+        if name == "ctrl":
+            return int(self.state == "stand" or self.ctrl)
+        if name == "hitcount":
+            return self.combo
         if name == "alive":
             return 1
         if name == "id":
@@ -545,15 +707,18 @@ class Dummy:
 
 # --------------------------------------------------------------------- simulador
 
-CTRL_IGNORED = {"null", "playsnd", "stopsnd", "screenbound", "nothitby", "hitby",
+EDGE_TRIGGERS = {"backedgedist", "frontedgedist", "backedgebodydist", "frontedgebodydist",
+                 "leftedge", "rightedge", "screenpos x", "camerapos x"}
+
+CTRL_IGNORED = {"null", "playsnd", "stopsnd", "nothitby", "hitby",
                 "afterimage", "afterimagetime", "envshake", "envcolor", "assertspecial_",
-                "makedust", "sndpan", "width", "attackmulset", "defencemulset", "hitoverride",
-                "posfreeze", "lifeadd", "lifeset", "displaytoclipboard", "appendtoclipboard",
+                "makedust", "sndpan", "defencemulset", "hitoverride",
+                "lifeset", "displaytoclipboard", "appendtoclipboard",
                 "clearclipboard", "victoryquote", "forcefeedback", "gamemakeanim", "bgpalfx",
                 "allpalfx", "remappal", "hitfalldamage", "hitfallvel",
-                "hitfallset", "fallenvshake", "targetfacing", "targetlifeadd", "targetpoweradd",
-                "targetdrop", "reversaldef", "attackdist", "offset", "modifyexplod",
-                "explodbindtime", "zoom", "camera", "powerset"}
+                "hitfallset", "fallenvshake", "targetpoweradd",
+                "targetdrop", "reversaldef", "attackdist", "offset",
+                "zoom", "camera"}
 # controladores registrados como evento "ctrl" (som, tremor, cor, rastro, sumir, prender)
 REVERSAL_T = 8           # tick da janela do ReversalDef em que o boneco "ataca" o contra
 HELPER_MAX = 56          # helpers vivos por jogador (MUGEN 1.1)
@@ -585,18 +750,27 @@ class Sim:
         self.unsupported: dict[str, int] = {}
         self.events: list[dict] = []
         self.helpers: list[Entity] = []
+        self.projs: list[Entity] = []
+        self.p2_run: P2Runner | None = None       # o P2 num estado do atacante
         self.explods: list[Explod] = []
         self.live_explods: list[Explod] = []       # só as vivas (o passo tira as que saíram)
         self.pause = 0
         self.pause_owner: Entity | None = None
         self._reversed = False                    # o boneco já "atacou" o ReversalDef
         self.max_ticks = max_ticks
-        self.ikemen = bool(getattr(char, "is_zss", False))   # regras do Ikemen (expressões, física)
+        # regras de versão do char: o Ikemen olha o ikemenversion do .def, não o formato dos
+        # estados (um ZSS sem ikemenversion segue as regras de char MUGEN, como o kfm_zss)
+        self.ikemenver = _ikemen_version(char)
+        # motor: char ZSS ou com ikemenversion só roda no Ikemen GO (expressões, física)
+        self.ikemen = bool(getattr(char, "is_zss", False)) or self.ikemenver
         try:                                       # localcoord do char / 320 (escala dos limites)
             self.lc_ratio = float(char.info("localcoord", "320,240").split(",")[0]) / 320 or 1.0
         except ValueError:
             self.lc_ratio = 1.0
         self.consts = self._load_consts()
+        # versão do MUGEN do char (.def mugenversion): WinMUGEN arredonda distâncias e pausa 1 a menos
+        self.mugen1 = self.ikemen or str(char.info("mugenversion", "1.0")).strip().startswith("1")
+        self.air_juggle = int(self.const("data.airjuggle"))
         self.stand_h = self._stand_height()
         self.body_w = 14.0
         self.p1 = Entity(self, "P1", state)
@@ -604,6 +778,19 @@ class Sim:
         self.p1.ctrl = 0
         self.p2 = Dummy(pos=[p2_dist, 0.0])
         self.p2._sim = self
+        # câmera do Ikemen (camera.go, Fighting_View) sem zoom e sem palco: 320 de largura na
+        # escala do char, tension 50, screenleft/screenright 15; começa no meio dos dois
+        lc = self.lc_ratio
+        self.cam_half, self.cam_tension, self.screen_lr = 160 * lc, 50 * lc, 15 * lc
+        self.stage_left, self.stage_right = -1e6, 1e6
+        span = 2 * (self.cam_half - self.screen_lr)   # o mais longe que os dois cabem na tela
+        if abs(p2_dist) > span:
+            p2_dist = math.copysign(span, p2_dist)
+            self.p2.pos[0] = p2_dist
+            self.note(tr("the dummy starts at most {0:.0f} px away (the width of the screen)").format(span))
+        self.cam_x = (self.p1.pos[0] + p2_dist) / 2
+        self.xmin = self.cam_x - self.cam_half + self.screen_lr
+        self.xmax = self.cam_x + self.cam_half - self.screen_lr
         self.track: list[dict] = []
         self.enter(self.p1, state, first=True)
         self.p1.started = False
@@ -650,7 +837,14 @@ class Sim:
                 if vals:
                     return vals[min(idx, len(vals) - 1)]
         defaults = {"movement.yaccel": 0.44, "movement.stand.friction": 0.85,
-                    "movement.crouch.friction": 0.82, "size.height": 60}
+                    "movement.crouch.friction": 0.82, "size.height": 60,
+                    # valores padrão do Ikemen (char.go) para queda, quique e juggle
+                    "movement.air.gethit.groundlevel": 25.0, "movement.down.bounce.offset.y": 20.0,
+                    "movement.down.bounce.yaccel": 0.4, "movement.down.bounce.groundlevel": 12.0,
+                    "movement.down.friction.threshold": 0.05, "data.liedown.time": 60,
+                    "data.fall.defence_up": 50,
+                    "data.airjuggle": 15, "size.ground.front": 16, "size.ground.back": 15,
+                    "size.air.front": 12, "size.air.back": 12}
         if key in defaults:
             return defaults[key]
         if self.ikemen:              # common.const do Ikemen: StateStand, FxDizzyEffect…
@@ -719,6 +913,8 @@ class Sim:
         return self.cache[n]
 
     def ev(self, ent, expr, default=0):
+        if getattr(ent, "proj", None) is not None:   # projétil: as expressões são do dono
+            ent = ent.parent
         try:
             return simexpr.evaluate(expr, ent)
         except simexpr.Unsupported as ex:
@@ -761,15 +957,21 @@ class Sim:
         ent.stateno = n
         ent.time = 0
         ent.persist = {}
-        ent.hitdef = None
-        ent.hitdef_hit = False
-        if not first:
+        ent.hold_time = ent.hold_anim = bool(ent.frozen)
+        h = sd[0] if sd is not None else {}
+        # hitdefpersist, movehitpersist e hitcountpersist (padrão 0): o que o Statedef não
+        # manda guardar zera ao entrar (Ikemen stateDef.Run)
+        on = lambda k: bool(self.ev(ent, h[k], 0)) if k in h else False
+        if first or not on("hitdefpersist"):
+            ent.hitdef = None
+            ent.hitdef_hit = False
+        if not first and not on("movehitpersist"):
             ent.movehit = ent.movecontact = ent.moveguarded = 0
+        if not first and not on("hitcountpersist"):
             ent.hitcount = 0
         if sd is None:
             self.note(tr("statedef {0} does not exist").format(n))
             return
-        h = sd[0]
         if "type" in h:
             ent.statetype = h["type"].strip().upper()[:1]
         if "movetype" in h:
@@ -777,13 +979,20 @@ class Sim:
         if "physics" in h:
             ent.physics = h["physics"].strip().upper()[:1]
         if "anim" in h:                                  # o MUGEN reinicia a anim mesmo se for a mesma
-            ent.anim, ent.anim_t = int(self.ev(ent, h["anim"], ent.anim)), 0
-        if "velset" in h:
-            ent.vel = list(self.evpair(ent, h["velset"]))
+            a = int(self.ev(ent, h["anim"], ent.anim))
+            if a != -1:                                  # anim = -1: não muda
+                ent.anim, ent.anim_t = a, 0
+        if "velset" in h:                                # só o y que vier escrito
+            parts = _split_args(h["velset"])
+            ent.vel[0] = float(self.ev(ent, parts[0], 0)) if parts and parts[0] else 0.0
+            if len(parts) > 1 and parts[1]:
+                ent.vel[1] = float(self.ev(ent, parts[1], 0))
         if "ctrl" in h:
             ent.ctrl = int(self.ev(ent, h["ctrl"], 0))
         if "sprpriority" in h:
             ent.sprpriority = int(self.ev(ent, h["sprpriority"], 0))
+        if "juggle" in h:                                # sem juggle o custo anterior fica
+            ent.juggle = int(self.ev(ent, h["juggle"], 0))
         if "poweradd" in h:
             (ent.root or ent).power += int(self.ev(ent, h["poweradd"], 0))
         if "facep2" in h and self.ev(ent, h["facep2"], 0):
@@ -861,6 +1070,10 @@ class Sim:
         typ = c.get("type", "")
         p = c["params"]
         g = lambda k, d=0: self.ev(ent, p[k], d) if k in p else d
+        if isinstance(ent, P2Runner):
+            r = self._p2_exec(ent, typ, p, g)
+            if r is not None:
+                return r
         if typ in CTRL_LOGGED:     # o que dá peso e leitura ao golpe (nota de qualidade)
             self.events.append({"t": self.tick, "who": ent.name, "kind": "ctrl", "value": typ,
                                 "label": c.get("label", ""), "state": ent.stateno,
@@ -897,8 +1110,11 @@ class Sim:
             if "anim" in p:
                 ent.anim, ent.anim_t = int(g("anim")), 0
             return "changed"
-        if typ == "changeanim":
-            ent.anim, ent.anim_t = int(g("value", ent.anim)), int(g("elem", 1)) - 1
+        if typ in ("changeanim", "changeanim2"):   # ChangeAnim2: anim do dono do estado (o mesmo char aqui)
+            new = int(g("value", ent.anim))
+            if ent.frozen and (new != ent.anim or "elem" in p):
+                ent.hold_anim = True
+            ent.anim, ent.anim_t = new, int(g("elem", 1)) - 1
             if ent.anim_t > 0:
                 st, _ = ent.starts()
                 ent.anim_t = st[min(len(st) - 1, ent.anim_t)]
@@ -932,6 +1148,28 @@ class Sim:
             return
         if typ == "ctrlset":
             ent.ctrl = int(g("value"))
+            return
+        if typ == "posfreeze":                    # só neste tick: a posição não anda (a velocidade sim)
+            ent.pos_frozen = bool(self.ev(ent, p.get("value", "1"), 1))
+            return
+        if typ == "attackmulset":
+            (ent.root or ent).attackmul = float(g("value", 1))
+            return
+        if typ in ("targetlifeadd", "lifeadd"):
+            if typ == "lifeadd":
+                return                            # a vida do P1 não entra na conta
+            # char MUGEN: curar (valor positivo) é sempre absolute (Ikemen, targetLifeAdd)
+            v = int(g("value"))
+            dealt = self._deal(-v, absolute=bool(g("absolute", 0)) or v > 0 and not self.ikemenver)
+            v = -dealt
+            self.p2.life = max(0, self.p2.life + v)
+            self.events.append({"t": self.tick, "who": ent.name, "kind": "vida", "label": c["label"],
+                                "state": ent.stateno, "root_state": (ent.root or ent).stateno,
+                                "dealt": -v, "life": self.p2.life, "p1power": 0, "p2power": 0})
+            return
+        if typ == "screenbound":                  # vale só neste tick (o motor religa a cada tick)
+            mc = self.evpair(ent, p.get("movecamera", "0,0"))
+            ent.screenbound = (bool(self.ev(ent, p.get("value", "0"), 0)), bool(mc[0]))
             return
         if typ == "playerpush":                   # vale só neste tick (o motor religa a cada tick)
             ent.push_off = not self.ev(ent, p.get("value", "1"), 1)
@@ -1000,6 +1238,33 @@ class Sim:
         if typ == "destroyself":
             ent.alive = False
             return
+        if typ == "modifyexplod":
+            self.modify_explod(ent, c)
+            return
+        if typ == "explodbindtime":
+            i, v = int(g("id", -1)), int(g("time", g("value", 0)))
+            owner = ent.root or ent
+            for e in self.live_explods:
+                if e.alive and (e.owner.root or e.owner) is owner and (i < 0 or e.id == i):
+                    e.bindtime = v if v < 0 else e.t + v
+            return
+        if typ == "width":                        # só neste tick: soma à caixa de tamanho (empurrão)
+            if "player" in p or "value" in p:
+                f, b = self.evpair(ent, p.get("player", p.get("value")), (0, 0))
+                ent.width_player = (float(f), float(b))
+            return
+        if typ == "hitadd":
+            (ent.root or ent).hitcount += int(g("value"))
+            return
+        if typ == "angleadd":
+            ent.angle += float(g("value"))
+            return
+        if typ == "anglemul":
+            ent.angle *= float(g("value", 1))
+            return
+        if typ == "powerset":
+            (ent.root or ent).power = int(g("value"))
+            return
         if typ == "removeexplod":
             i = int(g("id", -1))
             for e in self.live_explods:
@@ -1017,6 +1282,8 @@ class Sim:
             return
         if typ == "hitdef":
             ent.hitdef = {"params": p, "label": c["label"], "t": self.tick, "index": c.get("index")}
+            if self.ikemenver and "air.juggle" in p:   # Ikemen: air.juggle troca o juggle do estado
+                ent.juggle = int(g("air.juggle"))
             ent.hitdef_hit = False
             return
         if typ in ("superpause", "pause"):
@@ -1024,6 +1291,14 @@ class Sim:
             self.pause_owner = ent
             mt = int(g("movetime", 0))
             ent.pausemove = mt
+            # helpers, explods e projéteis andam na pausa pelo supermovetime (SuperPause) ou
+            # pelo pausemovetime (Pause), cada um na sua (Ikemen pauseStatus)
+            self.pause_kind = "super" if typ == "superpause" else "pause"
+            for o in [*self.helpers, *self.live_explods, *self.projs]:
+                mts = getattr(o, "movetimes", None)
+                if o is not ent and mts:
+                    v = mts.get(self.pause_kind, 0)
+                    o.pausemove = 10 ** 6 if v < 0 else v
             self.events.append({"t": self.tick, "who": ent.name, "kind": "pausa", "value": self.pause})
             if "poweradd" in p:
                 (ent.root or ent).power += int(g("poweradd"))
@@ -1035,19 +1310,39 @@ class Sim:
             ent.vel[1] += self.const("movement.yaccel")
             return
         if typ == "targetbind":
+            # Ikemen targetBind: o alvo fica em pos do atacante + pos x pelo lado dele, a cada
+            # tick por `time` ticks (padrão 1), já com o atacante na posição nova do tick
             ox, oy = self.evpair(ent, p.get("pos", "0,0"))
-            self.p2.pos = [ent.pos[0] + ox * ent.facing, ent.pos[1] + oy]
+            self.p2.bind = {"to": ent, "x": float(ox), "y": float(oy), "time": int(g("time", 1))}
+            return
+        if typ == "bindtotarget":
+            # o atacante vai ao alvo (pos x pelo lado do alvo) e o prende onde está
+            d = self.p2
+            ox, oy = self.evpair(ent, p.get("pos", "0,0"))
+            ent.pos = [d.pos[0] + float(ox) * d.facing, d.pos[1] + float(oy)]
+            d.bind = {"to": ent, "x": (d.pos[0] - ent.pos[0]) * ent.facing,
+                      "y": d.pos[1] - ent.pos[1], "time": int(g("time", 1))}
             return
         if typ == "targetstate":
-            # o boneco vai para um estado do atacante (ou volta aos dele: 5000-5199 e 0)
-            v = int(g("value", 0))
-            self.p2.custom = 0 if (v == 0 or 5000 <= v < 5200) else v
+            # o P2 vai para um estado do atacante (roda já neste tick, depois do P1) ou volta
+            # aos dele (5000-5199, 0...)
+            self.p2_enter(int(g("value", 0)), now=True)
             return
-        if typ == "targetvelset":
-            self.p2.vel = [float(g("x")) * -self.p2.facing, float(g("y"))]
+        if typ in ("targetvelset", "targetveladd"):
+            # Ikemen: t.vel[0] = x na velocidade local do alvo (positivo = para a frente dele)
+            d, add = self.p2, typ == "targetveladd"
+            if "x" in p:
+                d.vel[0] = d.vel[0] * add + float(g("x")) * d.facing
+            if "y" in p:
+                d.vel[1] = d.vel[1] * add + float(g("y"))
+            return
+        if typ == "targetfacing":                 # value > 0: olha para o mesmo lado do atacante
+            v = int(g("value", 0))
+            if v:
+                self.p2.facing = ent.facing * (1 if v > 0 else -1)
             return
         if typ == "projectile":
-            self.note(tr("Projectile is not simulated"))
+            self.make_projectile(ent, c)
             return
         if typ == "zssloopcut":                   # marcador do ZSS rebaixado: o laço passou do limite
             self.note(tr("ZSS loop cut at {0} turns").format(p.get("turns", "?")))
@@ -1055,6 +1350,162 @@ class Sim:
         if typ in CTRL_IGNORED or typ.startswith("snd"):
             return
         self.note(tr("controller {0} not simulated").format(typ))
+
+    # ---- o P2 num estado do atacante
+    GETHIT = {5000: ("hit", "shake"), 5001: ("hit", "slide"), 5010: ("hit", "shake"),
+              5011: ("hit", "slide"), 5020: ("air", "fly"), 5030: ("air", "fly"),
+              5035: ("air", "fly"), 5040: ("air", "recover"), 5050: ("fall", "falling"),
+              5070: ("fall", "falling"), 5071: ("fall", "falling"), 5080: ("down", "lie"),
+              5081: ("down", "lie"), 5100: ("down", "bounce"), 5101: ("down", "bounce2"),
+              5110: ("down", "lie"), 5120: ("down", "getup"), 5150: ("down", "lie")}
+
+    def p2_enter(self, v: int, now: bool) -> None:
+        """Põe o P2 no estado v do atacante; os estados comuns (parado e os de apanhar) voltam
+        ao boneco. `now`: roda já no passo do P2 deste tick (TargetState, que vem do P1)."""
+        d = self.p2
+        if v in self.GETHIT or v < 200 or self.statedef(v) is None:
+            if d.custom or self.p2_run is not None:
+                self.p2_leave(v)
+            return
+        r = self.p2_run
+        if r is None:
+            r = self.p2_run = P2Runner(self, "P2", v)
+            r.pid, r.root, r.parent = P2_ID, None, None
+            r.pos, r.facing = list(d.pos), d.facing
+            r.vel = [d.vel[0] * d.facing, d.vel[1]]
+            r.anim = 0
+        r.frozen = False
+        # o estado começa (Statedef: velset, anim...) no passo do P2, depois do bind que o P1
+        # aplica no fim do tick dele: já neste tick (TargetState vem antes dele) ou no seguinte
+        # (p2stateno: o acerto vem depois)
+        r.pending = v
+        r.stateno = v
+        d.custom = v
+        d.ctrl = False
+
+    def p2_leave(self, v: int, ctrl: bool = False) -> None:
+        """SelfState/ChangeState para um estado comum: o boneco segue dali (5050 cai, 5110
+        deitado, 0 parado...) com a posição e a velocidade que o estado deixou."""
+        d = self.p2
+        d.custom = 0
+        self.p2_run = None
+        state, sub = self.GETHIT.get(v, ("stand", ""))
+        if state == "stand":
+            d.state, d.sub, d.ctrl = "stand", "", True
+            self._recover(d)
+            if d.pos[1] < 0:                       # no ar: cai até o chão como num pulo
+                d.state, d.sub, d.ctrl = "air", "recover", True
+            return
+        d.state, d.sub, d.st = state, sub, (1 if sub in ("fly", "falling", "recover", "slide") else 0)
+        if state == "fall":
+            d.fall = True
+        if sub == "shake" and d.shake <= 0:
+            d.sub = "slide"
+        d.ctrl = False
+
+    def p2_gethitvar(self, key) -> float:
+        d = self.p2
+        key = str(key or "").lower()
+        # Ikemen: GetHitVar(xvel) é o ghv.xvel no mundo (velocidade x × -facing do atacante);
+        # o HitVel X é que vem relativo ao lado do P2
+        return {"xvel": d.hitvel[0], "yvel": d.hitvel[1], "yaccel": d.yaccel,
+                "animtype": d.animtype, "groundtype": d.groundtype, "airtype": d.airtype,
+                "type": d.airtype if d.stype() == "A" else d.groundtype,
+                "damage": d.hit_damage, "id": d.hitid, "chainid": d.hitid,
+                "fall": int(d.fall), "fall.yvel": d.fallvel[1],
+                "fall.xvel": d.fallvel[0] if d.fallvel[0] is not None else 0,
+                "hittime": d.hittime, "hitshaketime": d.shake, "slidetime": d.slidetime,
+                "ctrltime": d.ctrltime, "isbound": int(bool(d.bind)), "hitcount": d.combo,
+                "fall.recover": 0}.get(key, 0)
+
+    def _p2_exec(self, r: "P2Runner", typ: str, p: dict, g):
+        """Controladores que só valem para quem apanha, e as trocas de estado do P2."""
+        d = self.p2
+        if typ in ("selfstate", "changestate"):
+            v = int(g("value", r.stateno))
+            if typ == "selfstate" or v in self.GETHIT or v < 200:
+                self._p2_sync_back(r)
+                self.p2_leave(v, ctrl=bool(g("ctrl", 0)))
+                r.alive = False                    # para o resto do estado neste tick
+                return "left"
+            return None
+        if typ == "hitfallvel":
+            if d.fallvel[0] is not None:
+                r.vel[0] = d.fallvel[0]
+            r.vel[1] = d.fallvel[1]
+            return False
+        if typ == "hitfallset":
+            v = int(g("value", -1))
+            if v >= 0:
+                d.fall = bool(v)
+            if "xvel" in p or "yvel" in p:
+                d.fallvel = (float(g("xvel")) if "xvel" in p else d.fallvel[0],
+                             float(g("yvel")) if "yvel" in p else d.fallvel[1])
+            return False
+        if typ == "hitvelset":
+            if int(g("x", 1)):
+                r.vel[0] = d.hitvel[0] * d.facing
+            if int(g("y", 1)):
+                r.vel[1] = d.hitvel[1]
+            return False
+        if typ in ("hitfalldamage", "fallenvshake"):
+            return False
+        if typ in ("hitdef", "helper", "projectile", "superpause", "pause", "targetbind",
+                   "targetstate", "bindtotarget"):
+            return False                       # o P2 não ataca nem segura ninguém aqui
+        return None
+
+    def _p2_sync_back(self, r: "P2Runner") -> None:
+        d = self.p2
+        d.pos, d.facing = list(r.pos), r.facing
+        d.vel = [r.vel[0] * r.facing, r.vel[1]]
+
+    def step_p2_run(self) -> None:
+        """Um tick do P2 no estado do atacante: roda os controladores (o P1 é o oponente) e
+        anda pela física do Statedef; os tempos do acerto continuam correndo."""
+        r, d = self.p2_run, self.p2
+        if r.started and getattr(r, "pending", None) is None:
+            r.time += 1
+            r.anim_t += 1
+        r.started = True
+        r.frozen, r.push_off, r.pos_frozen = False, False, False
+        r.screenbound = (True, True)
+        r.pos, r.facing = list(d.pos), d.facing
+        r.vel = [d.vel[0] * d.facing, d.vel[1]]
+        if getattr(r, "pending", None) is not None:
+            v, r.pending = r.pending, None
+            self.enter(r, v)
+            r.hold_time = r.hold_anim = False
+        bound = d.bind is not None and d.bind["time"] != 0
+        self.run_entity(r)
+        if self.p2_run is not r:
+            return
+        if not bound and not r.pos_frozen:
+            r.pos[0] += r.vel[0] * r.facing
+            r.pos[1] += r.vel[1]
+        if r.physics == "A":
+            r.vel[1] += self.const("movement.yaccel") or 0.44
+            if r.pos[1] >= 0 and r.vel[1] > 0:
+                self._p2_sync_back(r)
+                self.p2_leave(52)
+                d.pos[1], d.vel = 0.0, [0.0, 0.0]
+                return
+        elif r.physics in ("S", "C"):
+            r.vel[0] *= self.const("movement.stand.friction") or 0.85
+            if abs(r.vel[0]) < self.lc_ratio:
+                r.vel[0] = 0.0
+        self._p2_sync_back(r)
+        self._tick_hit_timers(d)
+
+    def _apply_bind(self) -> None:
+        """TargetBind/BindToTarget: o P2 vai para perto de quem o prende (e copia a velocidade
+        dele), antes de andar; o tempo do bind desce no fim do tick."""
+        d, b = self.p2, self.p2.bind
+        if b is None or b["time"] == 0:
+            return
+        to = b["to"]
+        d.pos = [to.pos[0] + to.facing * b["x"], to.pos[1] + b["y"]]
+        d.vel = [to.vel[0] * to.facing, to.vel[1]]
 
     def _set_vars(self, ent: Entity, dest: Entity, p: dict, add: bool) -> None:
         """VarSet/VarAdd (e ParentVar*): as expressões valem para `ent`, o resultado vai para as
@@ -1090,25 +1541,7 @@ class Sim:
         if len(self.live_explods) >= EXPLOD_MAX:
             self.note(tr("Explod limit reached ({0})").format(EXPLOD_MAX))
             return
-        ox, oy = self.evpair(ent, p.get("pos", "0,0"))
-        postype = p.get("postype", "p1").lower()
-        rel = int(g("facing", 1)) or 1
-        if postype == "p2":
-            base = self.p2
-            bf = self.p2.facing
-            x, y = base.pos[0] + ox * bf, base.pos[1] + oy
-            facing = bf * rel
-            bind = None                                 # preso ao oponente: só no nascimento
-        elif postype in ("left", "right", "front", "back", "none"):
-            # tela: x a partir da borda; o simulador usa a câmera centrada no começo
-            x = self.origin_x + (-160 if postype in ("left", "back") else 160 if postype in ("right", "front") else 0) + ox
-            y = oy - 240 + 200 if postype != "none" else oy
-            facing = rel
-            bind = None
-        else:
-            x, y = ent.pos[0] + ox * ent.facing, ent.pos[1] + oy
-            facing = ent.facing * rel
-            bind = ent
+        x, y, facing, move_f, bind, space, ox, oy = self._explod_place(ent, p, g)
         sx, sy = self.evpair(ent, p.get("scale", "1,1"), (1, 1))
         vx, vy = self.evpair(ent, p.get("vel", "0,0"))
         axx, ayy = self.evpair(ent, p.get("accel", "0,0"))
@@ -1116,32 +1549,273 @@ class Sim:
                    scale=(sx, sy), angle=float(g("angle", 0)), spr=int(g("sprpriority", 0)),
                    trans=p.get("trans", "").lower() or None, removetime=int(g("removetime", -2)),
                    bindtime=int(g("bindtime", 0)), bind_to=bind, offset=(ox, oy), vel=(vx, vy),
-                   accel=(axx, ayy), id=int(g("id", -1)), owner=ent,
-                   space=("screen" if p.get("space", "").lower() == "screen"
-                          or postype in ("left", "right", "front", "back") else "stage"),
+                   accel=(axx, ayy), id=int(g("id", -1)), owner=ent, space=space,
                    label=c["label"], removeongethit=bool(g("removeongethit", 0)), born=self.tick,
-                   pausemove=int(g("supermovetime", 0)) or int(g("pausemovetime", 0)),
+                   pausemove=self._movetime(g),
                    # faísca: nasce do acerto (movehit/movecontact, ou o contador de acertos que
                    # os modelos do repertório usam: hitcount > var(1))
                    on_hit=any(re.search(r"(?i)move(hit|contact)|\bhitcount\b", t)
                               for ts in [c["triggerall"], *c["triggers"].values()] for t in ts),
                    alpha=self.evpair(ent, p["alpha"], (256, 256)) if "alpha" in p else None)
+        e.movetimes = {"super": int(g("supermovetime", 0)), "pause": int(g("pausemovetime", 0))}
+        e.move_facing = move_f
+        if "friction" in p:
+            fx, fy = self.evpair(ent, p["friction"], (1, 1))
+            e.friction = (float(fx), float(fy))
         self.explods.append(e)
         self.live_explods.append(e)
         self.events.append({"t": self.tick, "who": ent.name, "kind": "explod", "value": anim,
                             "label": c["label"]})
+
+    # parâmetros que um char MUGEN só muda no ModifyExplod quando também dá o postype
+    MODIFY_LOCKED = {"pos", "random", "vel", "velocity", "accel", "facing", "vfacing", "space"}
+
+    def modify_explod(self, ent: Entity, c) -> None:
+        """ModifyExplod como o Ikemen: num char MUGEN, pos/vel/accel/facing só mudam com postype
+        (e aí o explod é reposicionado do zero: velocidade e aceleração zeram, bindtime 0
+        vira 1); scale, removetime, bindtime, sprpriority, trans, angle e anim valem sempre."""
+        p = c["params"]
+        g = lambda k, d=0: self.ev(ent, p[k], d) if k in p else d
+        eid = int(g("id", -1))
+        owner = ent.root or ent
+        exps = [e for e in self.live_explods if e.alive and (e.owner.root or e.owner) is owner
+                and (eid < 0 or e.id == eid)]
+        has_pt = "postype" in p
+        locked = not self.ikemenver and not has_pt
+        for e in exps:
+            if has_pt:
+                x, y, facing, move_f, bind, space, ox, oy = self._explod_place(ent, p, g)
+                e.pos, e.facing, e.move_facing, e.bind_to, e.space = [x, y], facing, move_f, bind, space
+                e.offset = (ox, oy)
+                e.vel, e.accel = (0.0, 0.0), (0.0, 0.0)
+                if e.bindtime == 0:
+                    e.bindtime = e.t + 1
+            elif not locked and "pos" in p:            # char do Ikemen: pos relativa, sem virar
+                ox, oy = self.evpair(ent, p["pos"], (0, 0))
+                e.pos = [e.pos[0] - e.offset[0] + ox, e.pos[1] - e.offset[1] + oy]
+                e.offset = (ox, oy)
+            if not locked:
+                if "vel" in p or "velocity" in p:
+                    vx, vy = self.evpair(ent, p.get("vel", p.get("velocity")), (0, 0))
+                    e.vel = (float(vx), float(vy))
+                if "accel" in p:
+                    ax, ay = self.evpair(ent, p["accel"], (0, 0))
+                    e.accel = (float(ax), float(ay))
+                if "facing" in p:
+                    e.facing = e.move_facing * (-1 if int(g("facing", 1)) < 0 else 1)
+                if "vfacing" in p:
+                    e.vfacing = -1 if int(g("vfacing", 1)) < 0 else 1
+            if "scale" in p:
+                e.scale = tuple(float(v) for v in self.evpair(ent, p["scale"], (1, 1)))
+            if "removetime" in p:                       # conta desde o nascimento (e.time)
+                e.removetime = int(g("removetime", -2))
+            if "bindtime" in p:                         # relógio que desce a partir de agora
+                v = int(g("bindtime", 0))
+                e.bindtime = v if v < 0 else e.t + v
+            if "sprpriority" in p:
+                e.spr = int(g("sprpriority", 0))
+            if "trans" in p:
+                e.trans = p["trans"].strip().lower() or None
+            if "alpha" in p:
+                e.alpha = self.evpair(ent, p["alpha"], (256, 256))
+            if "angle" in p:
+                e.angle = float(g("angle", 0))
+            if "friction" in p:
+                fx, fy = self.evpair(ent, p["friction"], (1, 1))
+                e.friction = (float(fx), float(fy))
+            if "anim" in p and not p["anim"].strip().upper().startswith("F"):
+                a = int(g("anim", e.anim))
+                if a != e.anim:
+                    e.anim, e.anim_t0 = a, e.t
+
+    def _explod_place(self, ent: Entity, p: dict, g) -> tuple:
+        """(x, y, facing, lado do movimento, preso a, space, offset x, offset y) do Explod pelo
+        postype, como o Explod.setPos do Ikemen."""
+        ox, oy = self.evpair(ent, p.get("pos", "0,0"))
+        postype = p.get("postype", "p1").lower()
+        rel = -1 if int(g("facing", 1)) < 0 else 1
+        space = p.get("space", "").strip().lower()
+        if space not in ("screen", "stage"):          # sem space: front/back/left/right são da tela
+            space = "screen" if postype in ("left", "right", "front", "back") else "stage"
+        # Ikemen Explod.setPos: p1/p2 partem do char e o x vira pelo lado dele (guardado assim:
+        # preso, não acompanha uma virada depois); front/back viram left/right pelo lado do
+        # dono (back também inverte o x e herda o lado dele); o lado do movimento é o do char
+        # (p1/p2/back) ou 1, e o desenho soma o facing do parâmetro
+        move_f, bind = 1, None
+        if postype in ("p1", "p2"):
+            base = self.p2 if postype == "p2" else ent
+            move_f = base.facing
+            ox *= move_f
+            x, y = base.pos[0] + ox, base.pos[1] + oy
+            if space == "stage":
+                bind = base
+        else:
+            pt = postype
+            if pt in ("front", "back"):
+                if pt == "back":
+                    move_f = ent.facing
+                right = ent.facing > 0 and pt == "front" or ent.facing < 0 and pt == "back"
+                if right and pt == "back":
+                    ox = -ox
+                pt = "right" if right else "left"
+            edge = {"left": -160, "right": 160}.get(pt, -160 if space == "screen" else None)
+            if edge is None:                          # none no palco: posição absoluta
+                x, y = self.origin_x + ox, oy
+            else:
+                # tela: x a partir da borda; o simulador usa a câmera centrada no começo
+                x, y = self.origin_x + edge + ox, oy - 240 + 200
+        return x, y, move_f * rel, move_f, bind, space, ox, oy
+
+    def _movetime(self, g) -> int:
+        """Ticks que anda na pausa em curso (ou na próxima, se não há): supermovetime na
+        SuperPause, pausemovetime na Pause; -1 = a pausa toda."""
+        kind = getattr(self, "pause_kind", "super")
+        v = int(g("supermovetime" if kind == "super" else "pausemovetime", 0))
+        return 10 ** 6 if v < 0 else v
+
+    def make_projectile(self, ent: Entity, c):
+        """Controlador Projectile como o Ikemen (Projectile.update/tick): anda depois dos
+        personagens e antes da colisão, congela no próprio hitpause, acerta `projhits` vezes
+        com `projmisstime` entre um e outro e sai pela animação de acerto/remoção, pelo
+        `projremovetime` ou pelas bordas da tela."""
+        p = c["params"]
+        g = lambda k, d=0: self.ev(ent, p[k], d) if k in p else d
+        pair = lambda k, d: tuple(float(x) for x in self.evpair(ent, p[k], d)) if k in p else d
+        anim = int(g("projanim", 0))
+        ox, oy = self.evpair(ent, p.get("offset", "0,0"))
+        postype = p.get("postype", "p1").lower()
+        qx, qy, qf = self.spawn_pos(ent, postype, float(ox), float(oy), float(g("facing", 1)), True)
+        q = Entity(self, f"proj {int(g('projid', 0))}", 0)
+        q.parent, q.root = ent, None          # o acerto do projétil não dá MoveHit ao dono
+        q.pid = ent.pid
+        q.facing = qf
+        q.pos = [qx, qy]
+        q.vel = list(pair("velocity", (0.0, 0.0)))
+        q.anim, q.anim_t = anim, 0
+        sc = pair("projscale", (1.0, 1.0))
+        q.scale = (sc[0], sc[1])
+        q.sprpriority = int(g("projsprpriority", 3))
+        q.started = True
+        hit_anim = int(g("projhitanim", -1))
+        q.proj = {"id": int(g("projid", 0)), "hits": int(g("projhits", 1)),
+                  "misstime": int(g("projmisstime", 0)), "miss": 0,
+                  "removetime": int(g("projremovetime", -1)), "remove": bool(g("projremove", 1)),
+                  "hitanim": hit_anim, "remanim": int(g("projremanim", hit_anim)),
+                  "accel": pair("accel", (0.0, 0.0)), "velmul": pair("velmul", (1.0, 1.0)),
+                  "remvel": pair("remvelocity", (0.0, 0.0)),
+                  "edge": float(g("projedgebound", 40)), "stage": float(g("projstagebound", 40)),
+                  "height": pair("projheightbound", (-240.0, 1.0)),
+                  "status": "active", "contact": False, "hitpause": 0,
+}
+        q.pausemove = self._movetime(g)
+        q.movetimes = {"super": int(g("supermovetime", 0)), "pause": int(g("pausemovetime", 0))}
+        q.hitdef = {"params": p, "label": c["label"], "t": self.tick, "index": c.get("index")}
+        q.hitdef_hit = False
+        self.projs.append(q)
+
+    def _proj_leaves(self, q: Entity) -> bool:
+        """Saiu pelas bordas: da tela (projedgebound), do palco (projstagebound) ou da altura."""
+        pr = q.proj
+        x, vx = q.pos[0], q.vel[0] * q.facing
+        if not self.xmin - self.screen_lr - pr["edge"] <= x <= self.xmax + self.screen_lr + pr["edge"]:
+            return True
+        # sem palco: as bordas do palco ficam longe (o projstagebound não corta antes da tela)
+        if vx < 0 and x < self.stage_left - self.cam_half - pr["stage"] or \
+                vx > 0 and x > self.stage_right + self.cam_half + pr["stage"]:
+            return True
+        lo, hi = pr["height"]
+        return q.vel[1] > 0 and q.pos[1] > hi or q.vel[1] < 0 and q.pos[1] < lo
+
+    def step_projectiles(self, paused: bool) -> None:
+        """Projectile.update: remoção, troca para a animação de acerto/remoção e o movimento."""
+        for q in self.projs:
+            if not q.alive:
+                continue
+            pr = q.proj
+            q.frozen = paused and q.pausemove <= 0 or pr["hitpause"] > 0
+            if q.frozen:
+                continue
+            if pr["status"] == "active" and (pr["removetime"] == 0 or self._proj_leaves(q)):
+                pr["status"] = "rem"
+            if pr["status"] != "active" and not pr.get("done"):
+                pr["done"] = True
+                anim = pr["hitanim"] if pr["status"] == "hit" else pr["remanim"]
+                if anim < 0 or self.char.anims.get(anim) is None:
+                    q.alive = False
+                    continue
+                q.anim, q.anim_t = anim, 0
+                q.vel, pr["accel"], pr["velmul"] = list(pr["remvel"]), (0.0, 0.0), (1.0, 1.0)
+            if pr["status"] != "active" and q.animtime() == 0:
+                q.alive = False
+                continue
+            q.pos[0] += q.vel[0] * q.facing
+            q.pos[1] += q.vel[1]
+            q.vel = [(q.vel[0] + pr["accel"][0]) * pr["velmul"][0],
+                     (q.vel[1] + pr["accel"][1]) * pr["velmul"][1]]
+
+    def tick_projectiles(self, paused: bool) -> None:
+        """Projectile.tick: o contato gasta um acerto (sem acertos: animação de acerto), o
+        projmisstime começa e os relógios andam fora da pausa e do hitpause."""
+        for q in self.projs:
+            if not q.alive:
+                continue
+            pr = q.proj
+            if pr["contact"]:
+                pr["contact"] = False
+                pr["miss"] = max(0, pr["misstime"])
+                pr["hits"] -= 1
+                if pr["hits"] <= 0 and pr["remove"]:
+                    pr["status"] = "hit"
+            if paused and q.pausemove <= 0:
+                continue
+            if paused:
+                q.pausemove -= 1
+            if pr["hitpause"] > 0:
+                pr["hitpause"] -= 1
+                continue
+            q.anim_t += 1
+            if pr["removetime"] > 0:
+                pr["removetime"] -= 1
+            if pr["miss"] > 0:
+                pr["miss"] -= 1
+            # volta a poder acertar quando o misstime acaba e ainda tem acertos
+            q.hitdef_hit = not (pr["status"] == "active" and pr["hits"] > 0 and pr["miss"] <= 0)
+        self.projs = [q for q in self.projs if q.alive]
+
+    def _proj_contact(self, ent: Entity, kind: str) -> None:
+        """Contato de um projétil: congela o projétil (hitpause dele) e marca o dono
+        (ProjHitTime/ProjContactTime/ProjGuardedTime)."""
+        pr = ent.proj
+        pr["contact"] = True
+        pr["hitpause"], ent.hitpause = ent.hitpause, 0
+        ent.parent.proj_contact = {"type": kind, "t": self.tick, "id": pr["id"]}
+
+    def spawn_pos(self, ent: Entity, postype: str, ox: float, oy: float, facing_param: float,
+                  proj: bool) -> tuple:
+        """(x, y, facing) de um Helper ou Projectile como o Ikemen (helperPos): p1/p2 partem do
+        char com o x pelo lado dele; front/back saem da borda da tela do lado do dono (x para
+        dentro), left/right da borda; front/back/left/right/none usam o y absoluto. O facing
+        do parâmetro vezes o do char (p1, p2, front/back; o projétil sempre pelo dono)."""
+        f = -1 if facing_param < 0 else 1
+        left, right = self.origin_x - 160, self.origin_x + 160
+        if postype == "p2":
+            d = self.p2
+            return d.pos[0] + ox * d.facing, d.pos[1] + oy, f * (ent.facing if proj else d.facing)
+        if postype in ("front", "back"):
+            edge = right if (ent.facing > 0) == (postype == "front") else left
+            return edge + (ox if ent.facing > 0 else -ox), oy, f * ent.facing
+        if postype in ("left", "right"):
+            return (left if postype == "left" else right) + ox, oy, f * (ent.facing if proj else 1)
+        if postype == "none":
+            return self.origin_x + ox, oy, f * (ent.facing if proj else 1)
+        return ent.pos[0] + ox * ent.facing, ent.pos[1] + oy, f * ent.facing
 
     def make_helper(self, ent: Entity, c):
         p = c["params"]
         g = lambda k, d=0: self.ev(ent, p[k], d) if k in p else d
         ox, oy = self.evpair(ent, p.get("pos", "0,0"))
         postype = p.get("postype", "p1").lower()
-        if postype == "p2":
-            bx, by, bf = self.p2.pos[0], self.p2.pos[1], self.p2.facing
-        elif postype in ("left", "right", "front", "back"):
-            bx, by, bf = self.origin_x + (-160 if postype in ("left", "back") else 160), 0.0, 1
-        else:
-            bx, by, bf = ent.pos[0], ent.pos[1], ent.facing
+        hx, hy, hf = self.spawn_pos(ent, postype, float(ox), float(oy), float(g("facing", 1)), False)
         root = ent.root or ent
         # o motor tem um teto de helpers vivos (MUGEN: 56 por jogador); sem ele, helper que cria
         # helper no 1º tick vira laço infinito (Kashimo 3100)
@@ -1153,20 +1827,26 @@ class Sim:
         self._next_pid = getattr(self, "_next_pid", P2_ID) + 1
         h.pid = self._next_pid
         h.parent, h.root = ent, root
-        h.facing = ent.facing * (1 if int(g("facing", 1)) >= 0 else -1)
-        h.pos = [bx + ox * (bf if postype != "p2" else bf), by + oy]
+        h.facing, h.pos = hf, [hx, hy]
         h.scale = (float(g("size.xscale", 1)), float(g("size.yscale", 1)))
         # o resto do size.* do Helper (size.head.pos, size.height…) vale no const() do helper
         h.size = {k: [float(v) for v in self.evpair(ent, p[k], (0, 0))[:len(_split_args(p[k]))]]
                   for k in p if k.startswith("size.")}
         h.size["size.xscale"], h.size["size.yscale"] = [h.scale[0]], [h.scale[1]]
-        h.pausemove = int(g("pausemovetime", 0)) or int(g("supermovetime", 0))
+        h.pausemove = self._movetime(g)
+        h.movetimes = {"super": int(g("supermovetime", 0)), "pause": int(g("pausemovetime", 0))}
         h.anim = ent.anim
         h.screen = postype in ("left", "right", "front", "back")
         self.helpers.append(h)
         self.enter(h, h.stateno, first=True)
-        self.run_entity(h)                       # o helper roda o 1º tick ao nascer (BindToRoot já vale)
-        h.born_run = self.tick                   # ... e não roda de novo no mesmo tick (step)
+        if self.pause > 0 and h.pausemove <= 0:
+            # nasceu parado na pausa (sem supermovetime/pausemovetime): o Ikemen não roda o
+            # estado de quem está parado, o Time = 0 dele roda no 1º tick depois da pausa (rodar
+            # já aqui repetia o Time = 0 e o VarAdd que conta os acertos contava dobrado)
+            h.born_run = -1
+        else:
+            self.run_entity(h)                   # o helper roda o 1º tick ao nascer (BindToRoot já vale)
+            h.born_run = self.tick               # ... e não roda de novo no mesmo tick (step)
         self.events.append({"t": self.tick, "who": ent.name, "kind": "helper", "value": h.stateno,
                             "label": c["label"]})
 
@@ -1192,6 +1872,10 @@ class Sim:
         return out
 
     def p2_box(self):
+        if self.p2_run is not None:               # no estado do atacante: as Clsn2 do quadro dele
+            box = self.boxes(self.p2_run, "2")
+            if box:
+                return box
         d = self.p2
         clsn = self.p2_clsn
         if isinstance(clsn, dict):                # caixas por pose do oponente de verdade
@@ -1208,6 +1892,21 @@ class Sim:
         h = self.stand_h * (0.6 if d.pose == "crouch" and d.pos[1] >= 0 else 0.95)
         return [(d.pos[0] - 14, d.pos[1] - h, d.pos[0] + 14, d.pos[1])]
 
+    def dist_round(self, v: float) -> float:
+        """WinMUGEN (mugenversion antes da 1.0) trunca as distâncias para inteiro."""
+        return v if self.mugen1 else float(int(v))
+
+    def body_dist_x(self, ent: Entity) -> float:
+        """P2BodyDist X do Ikemen (bodyDistX): a distância menos a frente da caixa de tamanho
+        de quem pergunta e a frente do P2 (a de trás se ele está de costas)."""
+        d = self.p2
+        dist = (d.pos[0] - ent.pos[0]) * ent.facing
+        f1, _, _ = self._size(None, ent.statetype == "A")
+        size2 = (self.p2_clsn or {}).get("size") if isinstance(self.p2_clsn, dict) else None
+        f2, b2, _ = self._size(size2 or None, d.stype() == "A")
+        facing_each_other = (dist >= 0) == (ent.facing != d.facing)
+        return dist - f1 - (f2 if facing_each_other else b2)
+
     def _size(self, src, air: bool):
         """(front, back, height) da caixa de tamanho: constantes [Size] do char ou do oponente."""
         get = (lambda k, d: float(src.get(k, d))) if isinstance(src, dict) else (
@@ -1217,14 +1916,137 @@ class Sim:
             return get("air.front", 12), get("air.back", 12), h
         return get("ground.front", 16), get("ground.back", 15), h
 
+    # ---- câmera e bordas da tela
+    def _cam_tracked(self) -> list:
+        """(x, velocidade x no mundo) de quem move a câmera: P1 e P2 (helpers não, como no
+        Ikemen: só os jogadores ganham screenbound/movecamera por padrão)."""
+        out = []
+        p1 = self.p1
+        if p1.screenbound[1]:
+            out.append((p1.pos[0], 0.0 if p1.frozen else p1.vel[0] * p1.facing))
+        r = self.p2_run
+        if r is not None and r.alive and self.p2.custom:
+            if r.screenbound[1]:
+                out.append((r.pos[0], 0.0 if r.frozen else r.vel[0] * r.facing))
+        else:
+            out.append((self.p2.pos[0], self.p2.vel[0]))
+        return out
+
+    def step_camera(self) -> None:
+        """Camera.action do Ikemen (sem zoom, sem palco): a tela segue quem passa da tensão
+        (50 px da borda), andando aos poucos (5% por passo, 3 passos, ou a velocidade de quem
+        puxa); depois xmin/xmax = tela - screenleft/right e os jogadores ficam presos nela
+        (xScreenBound)."""
+        tr_ = self._cam_tracked()
+        if tr_:
+            lx = min(tr_, key=lambda v: v[0])
+            rx = max(tr_, key=lambda v: v[0])
+            leftest, leftvel = lx
+            rightest, rightvel = rx
+            half, ten = self.cam_half, self.cam_tension
+            old_l, old_r = self.cam_x - half, self.cam_x + half
+            tl, tr = old_l, old_r
+            if leftest < tl + ten:
+                diff = tl - max(leftest - ten, self.stage_left)
+                tl = max(leftest - ten, self.stage_left)
+                tr = max(old_r - diff, min(rightest + ten, self.stage_right))
+            elif rightest > tr - ten:
+                diff = tr - min(rightest + ten, self.stage_right)
+                tr = min(rightest + ten, self.stage_right)
+                tl = min(old_l - diff, max(leftest - ten, self.stage_left))
+            if tr - tl > 2 * half:                 # não cabe sem zoom: fica no meio dos dois
+                r_left = max(tl + ten - leftest, 0)
+                r_right = max(rightest - (tr - ten), 0)
+                diff = (tr - tl) - 2 * half
+                if r_left > r_right:
+                    d2 = min(r_left - r_right, diff)
+                    tr -= d2
+                    diff -= d2
+                elif r_right > r_left:
+                    d2 = min(r_right - r_left, diff)
+                    tl += d2
+                    diff -= d2
+                tl += diff / 2
+                tr -= diff / 2
+                sl = sr = self.screen_lr
+                if leftest - tl < sl:
+                    diff = min(sl - (leftest - tl), tl - self.stage_left)
+                    if tr - rightest < sr:
+                        diff -= min(sr - (tr - rightest), self.stage_right - tr)
+                    tl, tr = tl - diff, tr - diff
+                elif tr - rightest < sr:
+                    diff = min(sr - (tr - rightest), self.stage_right - tr)
+                    tl, tr = tl + diff, tr + diff
+            new_l, new_r = old_l, old_r
+            step = 0.1 * self.lc_ratio             # gameWidth / 3200
+            for _ in range(3):
+                new_l += (tl - new_l) * 0.05
+                new_r += (tr - new_r) * 0.05
+                dl, dr = tl - new_l, tr - new_r
+                new_l = tl if abs(dl) <= step else new_l + (step if dl > 0 else -step)
+                if 0 < new_l - old_l < rightvel:
+                    new_l = min(old_l + rightvel, tl)
+                elif leftvel < new_l - old_l < 0:
+                    new_l = max(old_l + leftvel, tl)
+                new_r = tr if abs(dr) <= step else new_r + (step if dr > 0 else -step)
+                if 0 < new_r - old_r < rightvel:
+                    new_r = min(old_r + rightvel, tr)
+                elif leftvel < new_r - old_r < 0:
+                    new_r = max(old_r + leftvel, tr)
+            x = (new_l + new_r) / 2
+            self.cam_x = math.ceil(x * 4 - 0.5) / 4    # sem zoom o Ikemen arredonda a 1/4 px
+        self.xmin = self.cam_x - self.cam_half + self.screen_lr
+        self.xmax = self.cam_x + self.cam_half - self.screen_lr
+        self.screen_clamp()
+
+    def screen_clamp(self) -> None:
+        """xScreenBound: P1 e P2 dentro de xmin/xmax (o Ikemen faz no update de cada char, logo
+        depois de andar, no empurrão e depois da câmera)."""
+        lo, hi = self.xmin, self.xmax
+        p1 = self.p1
+        if p1.screenbound[0]:
+            p1.pos[0] = min(max(p1.pos[0], lo), hi)
+        r = self.p2_run
+        if r is not None and r.alive and self.p2.custom:
+            if r.screenbound[0]:
+                r.pos[0] = min(max(r.pos[0], lo), hi)
+                self.p2.pos[0] = r.pos[0]
+        else:
+            self.p2.pos[0] = min(max(self.p2.pos[0], lo), hi)
+
+    def edge_trigger(self, who, name: str) -> float:
+        """BackEdgeDist, FrontEdgeDist (e Body), LeftEdge, RightEdge, ScreenPos X e CameraPos X
+        pela câmera simulada (Ikemen: distância a xmin/xmax; Body tira o width edge e, em char
+        MUGEN, 0,5 no ar e 1 deitado)."""
+        left = self.cam_x - self.cam_half
+        if name == "leftedge":
+            return left - self.origin_x
+        if name == "rightedge":
+            return left + 2 * self.cam_half - self.origin_x
+        if name == "camerapos x":
+            return self.cam_x - self.origin_x
+        if name == "screenpos x":
+            return who.pos[0] - left
+        back = name.startswith("back")
+        ahead = (who.facing > 0) != back            # olhando para a borda direita?
+        d = self.xmax - who.pos[0] if ahead else who.pos[0] - self.xmin
+        if "body" in name and not self.ikemenver:
+            st = who.stype() if isinstance(who, Dummy) else who.statetype
+            d -= {"A": 0.5, "L": 1.0}.get(st, 0.0)
+        return d
+
     def push_players(self):
-        """Corpos não se atravessam (Ikemen pushDetection): se as caixas de tamanho e as Clsn2
-        se sobrepõem, cada um anda metade da sobreposição para o seu lado (pesos iguais,
-        pushfactor 1). PlayerPush{value: 0} desliga no tick. Só P1 × P2 (o boneco)."""
+        """Corpos não se atravessam (Ikemen pushDetection): se as caixas de tamanho ([Size],
+        mais o Width) se sobrepõem, cada um anda metade da sobreposição para o seu lado (pesos
+        iguais, pushfactor 1). O Ikemen só olha as caixas de tamanho (não as Clsn2), e o P2
+        deitado tem a mesma caixa de em pé. PlayerPush{value: 0} desliga no tick. Só P1 × P2."""
         p1, d = self.p1, self.p2
-        if getattr(p1, "push_off", False) or d.state == "down":
+        # preso (TargetBind): o Ikemen devolve o P2 à posição do bind depois do empurrão
+        if getattr(p1, "push_off", False) or d.bind is not None and d.bind["time"] != 0:
             return
         f1, b1, h1 = self._size(None, p1.statetype == "A")
+        wp = getattr(p1, "width_player", (0.0, 0.0))        # Width: soma à frente e às costas
+        f1, b1 = f1 + wp[0], b1 + wp[1]
         size2 = (self.p2_clsn or {}).get("size") if isinstance(self.p2_clsn, dict) else None
         f2, b2, h2 = self._size(size2 or None, d.pos[1] < 0)
         # caixas no mundo (x à frente de cada um pelo lado em que olha)
@@ -1232,10 +2054,6 @@ class Sim:
         l2, r2 = sorted((d.pos[0] - b2 * d.facing, d.pos[0] + f2 * d.facing))
         overlap = min(r1, r2) - max(l1, l2)
         if overlap <= 0 or p1.pos[1] - h1 > d.pos[1] or d.pos[1] - h2 > p1.pos[1]:
-            return
-        mine, theirs = self.boxes(p1, "2"), self.p2_box()   # Clsn2 também precisam se tocar
-        if not any(a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
-                   for a in mine for b in theirs):
             return
         side = 1 if d.pos[0] >= p1.pos[0] else -1             # de que lado o P2 está
         p1.pos[0] -= side * overlap / 2
@@ -1245,18 +2063,28 @@ class Sim:
         hd = ent.hitdef
         if not hd or ent.hitdef_hit or ent.hitpause:
             return
+        if ent.proj is not None and (ent.proj["status"] != "active" or ent.proj["hits"] <= 0
+                                     or ent.proj["miss"] > 0 or ent.proj["hitpause"] > 0):
+            return
         p = hd["params"]
-        flag = p.get("hitflag", "MAF").upper()
+        flag = p.get("hitflag", "MAF").upper().replace("M", "HL")
         d = self.p2
-        if d.state == "down" and "D" not in flag:
+        if d.state == "down" and d.sub == "getup":     # 5120: NotHitBy SCA
             return
-        if d.pos[1] < 0 and "A" not in flag and "F" not in flag:
+        moving_h = d.movetype_h()
+        in_hit = moving_h and d.state != "guardhit"
+        # hitflag como o Ikemen (hittableByChar): a letra do StateType do P2 (H em pé, L
+        # agachado, A no ar, D deitado), F se ele está caindo, "-" só quem não apanha, "+" só
+        # quem apanha (fora da defesa)
+        if {"S": "H", "C": "L", "A": "A", "L": "D"}[d.stype()] not in flag:
             return
-        if d.state == "fall" and "F" not in flag:
+        if in_hit and d.fall and "F" not in flag:
             return
-        # no chão: H pega em pé, L agachado, M os dois
-        if d.pos[1] >= 0 and d.state not in ("down", "fall") and "M" not in flag \
-                and ("L" if d.pose == "crouch" else "H") not in flag:
+        if "-" in flag and moving_h or "+" in flag and not in_hit:
+            return
+        if not self._chain_ok(ent, p):
+            return
+        if not self._juggle_ok(ent, p, in_hit and d.fall):
             return
         mine = self.boxes(ent, "1")
         if not mine:
@@ -1277,26 +2105,63 @@ class Sim:
         ent.hitdef_hit = True
         ent.movehit = ent.movecontact = 1
         ent.hit_now = True
-        ent.hitcount += 1
+        numhits = max(0, int(self.ev(ent, p.get("numhits", "1"), 1)))
+        ent.hitcount += numhits
+        # combo do Ikemen (getterInCombo): o P2 ainda em acerto (movetype H) e não defendendo
+        d.combo = d.combo + numhits if in_hit else numhits
+        d.hitid = int(self.ev(ent, p.get("id", "0"), 0))
+        d.hit_damage = dmg["dealt"]
+        d.animtype, d.groundtype, d.airtype = self._hit_types(ent, p, d.stype() == "A")
         if ent.root is not None:
             ent.root.movehit = ent.root.movecontact = 1
             ent.root.hit_now = True
         pt = g("pausetime", (0, 0))
-        ent.hitpause = int(pt[0])
-        air = d.pos[1] < 0 or d.state in ("air", "fall")
+        ent.hitpause = self._attacker_pause(int(pt[0]))
+        air = d.stype() == "A"
         gv = g("air.velocity" if air else "ground.velocity", (0, 0))
-        fall = bool(self.ev(ent, p.get("fall", "0"), 0)) or air and bool(self.ev(ent, p.get("air.fall", p.get("fall", "0")), 0))
+        was_falling = d.fall and in_hit
+        if not in_hit:
+            d.fall = False                            # o fallflag só acumula dentro do combo
+        flag_of = lambda k, dft: bool(self.ev(ent, p[k], 0)) if k in p else dft
+        ground_fall = flag_of("fall", False)
+        d.fall = d.fall or (flag_of("air.fall", ground_fall) if air else ground_fall)
         # velocidade no mundo (Ikemen: ghv.xvel = velocity.x * -facing do atacante)
-        d.vel = [float(gv[0]) * -ent.facing, float(gv[1])]
+        vel = [float(gv[0]) * -ent.facing, float(gv[1]) if len(gv) > 1 else 0.0]
+        if not air and d.fall and vel[1] == 0:
+            vel[1] = -0.001                           # o MUGEN faz isso para cair do chão
         d.shake = int(pt[1])
-        d.hittime = int(self.ev(ent, p.get("ground.hittime", "15"), 15))
-        d.fall = fall or d.fall
-        d.state = "fall" if (fall or air or d.vel[1] < 0) else "hit"
-        d.facing = -ent.facing if d.state != "down" else d.facing
+        # hittime do Ikemen: no ar (ou lançado) air.hittime (padrão 20), no chão ground.hittime
+        # (padrão 0); char MUGEN ganha 1 tick (o Ikemen compensa a defesa um quadro mais cedo)
+        key, dft = ("air.hittime", 20) if air or vel[1] else ("ground.hittime", 0)
+        d.hittime = max(0, int(self.ev(ent, p[key], dft)) if key in p else dft)
+        if not self.ikemenver and d.hittime > 0:
+            d.hittime += 1
+        d.slidetime = int(self.ev(ent, p["ground.slidetime"], 0)) if "ground.slidetime" in p else 0
+        d.yaccel = float(self.ev(ent, p["yaccel"], 0.35)) if "yaccel" in p else 0.35 * self.lc_ratio
+        fx = float(self.ev(ent, p["fall.xvelocity"], 0)) if "fall.xvelocity" in p else None
+        d.fallvel = (fx, float(self.ev(ent, p["fall.yvelocity"], -4.5)) if "fall.yvelocity" in p
+                     else -4.5 * self.lc_ratio)
+        d.down_rt = int(self.const("data.liedown.time"))
+        # 5000/5010/5020: treme parado; depois 5001 (recuo no chão) ou 5030 (voa com o hitvelset)
+        d.hitvel, d.vel, d.sub, d.st = tuple(vel), [0.0, 0.0], "shake", 0
+        d.state = "hit" if not air and not vel[1] and not d.fall else ("fall" if d.fall else "air")
+        d.ctrl = False
+        self._juggle_spend(ent, p, was_falling or d.fall)
+        # p2facing: 1 vira o P2 para o atacante, -1 de costas; sem ele o acerto o vira de frente
+        p2f = int(self.ev(ent, p["p2facing"], 0)) if "p2facing" in p else 0
+        d.facing = ent.facing if p2f < 0 else -ent.facing
+        if "p1facing" in p and int(self.ev(ent, p["p1facing"], 0)) < 0 and ent.proj is None:
+            ent.facing = -ent.facing
         d.t = 0
-        d.hits += 1
-        # p2stateno: o oponente passa a rodar o estado do atacante (o gatilho p2stateno o vê)
-        d.custom = int(self.ev(ent, p["p2stateno"], 0)) if p.get("p2stateno", "").strip() else 0
+        d.hits += numhits
+        # p2stateno: o oponente passa a rodar o estado do atacante (o Time = 0 dele roda no
+        # tick seguinte: o P2 já rodou este tick quando o acerto acontece)
+        if p.get("p2stateno", "").strip():
+            v = int(self.ev(ent, p["p2stateno"], -1))
+            if v >= 0:
+                self.p2_enter(v, now=False)
+        elif d.custom:
+            self.p2_leave(5000)
         self.events.append({"t": self.tick, "who": ent.name, "kind": "acerto", "label": hd["label"],
                             "ci": hd.get("index"),
                             "value": [round(d.vel[0], 2), round(d.vel[1], 2)], "contact": contact,
@@ -1310,9 +2175,21 @@ class Sim:
                             "fall": d.fall, "shake": int(self.ev(ent, p.get("envshake.time", "0"), 0)) > 0,
                             "sound": bool(p.get("hitsound", "").strip()),
                             "snd": self._sound(ent, p.get("hitsound", ""), hitdef=True),
-                            "hittime": d.hittime,
+                            "hittime": d.hittime, "numhits": numhits, "combo": d.combo,
+                            "juggle": d.juggle.get(ent.pid),
                             # o oponente vai para um estado do atacante (agarrão cinematográfico)
                             "p2state": bool(p.get("p2stateno", "").strip())})
+        if ent.proj is not None:
+            self._proj_contact(ent, "hit")
+        elif p.get("p1stateno", "").strip():
+            # p1stateno: o atacante troca de estado no acerto (arremessos); o Time = 0 do estado
+            # novo roda no tick seguinte (stateChange1 no acerto, stateChange2 no próximo)
+            v = int(self.ev(ent, p["p1stateno"], -1))
+            if v >= 0:
+                self.enter(ent, v)
+                ent.ctrl = 0
+                ent.hold_time = ent.hold_anim = True
+                ent.hitdef_hit = True
 
     # Default.Attack.LifeToPowerMul e Default.GetHit.LifeToPowerMul do mugen.cfg padrão
     POWER_HIT, POWER_GETHIT = 0.7, 0.6
@@ -1322,14 +2199,92 @@ class Sim:
         [Data] do char (o boneco tem defence 100); sem getpower/givepower, a energia vem do dano."""
         pair = lambda v: (int(v[0]) if len(v) > 0 else 0, int(v[1]) if len(v) > 1 else 0)
         hit, guard = pair(g("damage", (0, 0)))
-        attack = (self.const("data.attack") or 100) / 100
+        attack = (self.const("data.attack") or 100) / 100 * getattr(ent.root or ent, "attackmul", 1.0)
         # sem o 2º valor (p1gpower, p2gpower) a energia na defesa é a metade, como no MUGEN
         given = lambda k: pair(g(k)) if len(_split_args(p[k])) > 1 else (pair(g(k))[0], None)
         p1 = given("getpower") if "getpower" in p else (round(hit * self.POWER_HIT), None)
         p2 = given("givepower") if "givepower" in p else (round(hit * self.POWER_GETHIT), None)
-        return {"dealt": round(hit * attack), "guard": round(guard * attack),
+        return {"dealt": self._deal(hit * attack), "guard": self._deal(guard * attack),
                 "p1power": p1[0], "p1gpower": p1[1] if p1[1] is not None else p1[0] // 2,
                 "p2power": p2[0], "p2gpower": p2[1] if p2[1] is not None else p2[0] // 2}
+
+    def _hit_types(self, ent: Entity, p: dict, air: bool) -> tuple:
+        """GetHitVar(animtype/groundtype/airtype) do HitDef: animtype light/medium/hard/back/up/
+        diagup (air.animtype no ar), ground.type high/low/trip (air.type padrão = ground.type)."""
+        def word(k, table, dft):
+            v = p.get(k, "").strip().lower()
+            return next((n for w, n in table if v.startswith(w)), dft) if v else dft
+        at_tab = (("l", 0), ("m", 1), ("h", 2), ("b", 3), ("u", 4), ("d", 5))
+        gt_tab = (("n", 0), ("h", 1), ("l", 2), ("t", 3))
+        at = word("animtype", at_tab, 0)
+        if air:
+            at = word("air.animtype", at_tab, at)
+        gt = word("ground.type", gt_tab, 1)
+        return at, gt, word("air.type", gt_tab, gt)
+
+    def _attacker_pause(self, p0: int) -> int:
+        """Ticks parados do atacante: o pausetime no MUGEN 1.x/Ikemen; um a menos num char do
+        WinMUGEN (o Ikemen soma 1 só para os outros: hitPauseTime = pausetime + hpFix)."""
+        return p0 if self.mugen1 else max(0, p0 - 1)
+
+    def _juggle_ok(self, ent: Entity, p: dict, falling: bool) -> bool:
+        """Pontos de juggle (Ikemen canJuggle): o custo do golpe (`juggle` do Statedef, ou
+        `air.juggle` do projétil) cabe no que sobra ao atacante (o [Data] airjuggle se ainda não
+        é alvo). Char com ikemenversion pega de graça quem não está caindo; char MUGEN pega de
+        graça quem ainda não é alvo dele, mas o projétil dele paga sempre."""
+        cost = self._juggle_cost(ent, p)
+        left = self.p2.juggle.get(ent.pid)
+        proj = getattr(ent, "proj", None) is not None
+        if cost <= (self.air_juggle if left is None else left):
+            return True
+        if self.ikemenver and not falling or not self.ikemenver and left is None and not proj:
+            return True
+        if left is not None:
+            if not getattr(self, "_juggle_noted", False):
+                self._juggle_noted = True
+                self.note(tr("juggle points ran out: the opponent could not be hit again"))
+        return False
+
+    def _juggle_cost(self, ent: Entity, p: dict) -> int:
+        if getattr(ent, "proj", None) is not None:
+            return int(self.ev(ent, p["air.juggle"], 0)) if "air.juggle" in p else 0
+        return ent.juggle
+
+    def _juggle_spend(self, ent: Entity, p: dict, falling: bool) -> None:
+        """No acerto o atacante vira alvo (com o máximo do [Data] airjuggle); se o P2 caía antes
+        ou depois do acerto, o custo sai e o do golpe zera (um golpe de vários acertos paga uma
+        vez só)."""
+        d = self.p2
+        d.juggle.setdefault(ent.pid, self.air_juggle)
+        if falling:
+            d.juggle[ent.pid] -= self._juggle_cost(ent, p)
+            if getattr(ent, "proj", None) is None:
+                ent.juggle = 0
+
+    def _chain_ok(self, ent: Entity, p: dict) -> bool:
+        """chainid/nochainid como o Ikemen (attrCheck): chainid só pega o P2 cujo último acerto
+        veio do HitDef com esse id; nochainid não pega enquanto o P2 está no acerto daquele id."""
+        d = self.p2
+        if "chainid" in p:
+            cid = int(self.ev(ent, p["chainid"], -1))
+            if cid >= 0 and d.hitid != cid:
+                return False
+        if "nochainid" in p and d.state in ("hit", "air", "fall", "down", "guardhit"):
+            for v in _split_args(p["nochainid"]):
+                if v.strip() and int(self.ev(ent, v, -1)) == d.hitid >= 0:
+                    return False
+        return True
+
+    def _deal(self, dmg: float, absolute: bool = False) -> int:
+        """Dano que sai da vida como o Ikemen (computeDamage): dividido pela defesa do P2 (sobe
+        depois de cair), ao menos 1 se houve dano, arredondado e no máximo a vida que sobra."""
+        if dmg == 0:
+            return 0
+        if not absolute:
+            dmg /= self.p2.def_mul
+        if 0 < dmg < 1:
+            dmg = 1
+        return int(min(round(dmg), max(0, self.p2.life)))
 
     def _guards(self, d: Dummy, p: dict) -> bool:
         """O boneco que defende segura o golpe se está livre e o guardflag cobre a postura
@@ -1352,16 +2307,34 @@ class Sim:
             ent.root.movecontact = ent.root.moveguarded = 1
             ent.root.hit_now = True
         pt = g("guard.pausetime", g("pausetime", (0, 0)))
-        ent.hitpause = int(pt[0])
+        ent.hitpause = self._attacker_pause(int(pt[0]))
         d.shake = int(pt[1])
         gv = self.ev(ent, p["guard.velocity"], 0) if "guard.velocity" in p else g("ground.velocity", (0, 0))[0]
-        d.vel = [float(gv) * -ent.facing, 0.0]
-        d.hittime = int(self.ev(ent, p.get("guard.hittime", p.get("ground.hittime", "15")), 15))
+        d.hitvel, d.vel = (float(gv) * -ent.facing, 0.0), [0.0, 0.0]
+        # guard.hittime: char MUGEN cai no ground.slidetime (o Ikemen segue o MUGEN, não a
+        # documentação), char do Ikemen no ground.hittime
+        base = "ground.hittime" if self.ikemenver else "ground.slidetime"
+        d.hittime = max(0, int(self.ev(ent, p["guard.hittime"], 0)) if "guard.hittime" in p
+                        else int(self.ev(ent, p[base], 0)) if base in p else 0)
         # common1.cns (151/153): CtrlSet em Time = GetHitVar(ctrltime) e 130 no HitOver; o
         # ctrltime cai no guard.slidetime, que cai no guard.hittime
         slide = int(self.ev(ent, p["guard.slidetime"], d.hittime)) if "guard.slidetime" in p else d.hittime
         d.ctrltime = int(self.ev(ent, p["guard.ctrltime"], slide)) if "guard.ctrltime" in p else slide
-        d.state, d.t = "guardhit", 0
+        d.slidetime = slide
+        d.airguard = d.stype() == "A"
+        if d.airguard:
+            # 154/155: airguard.velocity (padrão air.velocity x 1,5 e y 0,5) e airguard.ctrltime
+            av = g("air.velocity", (0, 0))
+            dx, dy = float(av[0]) * 1.5, float(av[1]) * 0.5
+            if "airguard.velocity" in p:
+                parts = _split_args(p["airguard.velocity"])
+                dx = float(self.ev(ent, parts[0], dx)) if parts and parts[0] else dx
+                dy = float(self.ev(ent, parts[1], dy)) if len(parts) > 1 and parts[1] else dy
+            d.hitvel = (dx * -ent.facing, dy)
+            if "airguard.ctrltime" in p:
+                d.ctrltime = int(self.ev(ent, p["airguard.ctrltime"], d.ctrltime))
+        d.state, d.t, d.sub, d.st = "guardhit", 0, "shake", 0
+        d.ctrl, d.combo = False, 0
         d.facing = -ent.facing
         self.events.append({"t": self.tick, "who": ent.name, "kind": "defesa", "label": hd["label"],
                             "ci": hd.get("index"),
@@ -1370,29 +2343,190 @@ class Sim:
                             "ctrltime": d.ctrltime, "dealt": dmg["guard"], "p1power": dmg["p1gpower"], "p2power": dmg["p2gpower"],
                             "life": d.life, "attr": p.get("attr", "").strip(),
                             "snd": self._sound(ent, p.get("guardsound", "6,0"), hitdef=True)})
+        if ent.proj is not None:
+            self._proj_contact(ent, "guard")
 
     def step_dummy(self):
+        """Um tick do boneco na ordem do Ikemen (actionRun): o estado roda (HitShakeOver passa
+        do tremor ao recuo, HitOver devolve o parado), o corpo anda com o atrito do chão e só
+        depois o hitshaketime e o hittime descem. Roda antes da colisão do tick."""
         d = self.p2
-        d.t += 1
-        if d.shake > 0:
-            d.shake -= 1
+        self._apply_bind()
+        if self.p2_run is not None:
+            self.step_p2_run()
+            if self.p2_run is not None:
+                d.t += 1
+                return
+            self._apply_bind()
+            d.t += 1
             return
+        bound = d.bind is not None and d.bind["time"] != 0
+        if bound:
+            pos = list(d.pos)
         if d.state in ("hit", "guardhit"):
-            d.pos[0] += d.vel[0]
-            d.vel[0] *= 0.88
-            d.hittime -= 1
-            d.ctrltime -= 1
-            if d.hittime <= 0:
-                d.state, d.vel = "stand", [0.0, 0.0]
-        elif d.state in ("fall", "air"):
-            d.pos[0] += d.vel[0]
-            d.pos[1] += d.vel[1]
+            self._step_stun(d)
+        elif d.state in ("air", "fall"):
+            self._step_air(d)
+        elif d.state == "down":
+            self._step_down(d)
+        if bound:                                  # preso: o corpo não anda pela velocidade
+            d.pos = pos
+        d.t += 1
+
+    def _step_airguard(self, d: Dummy) -> None:
+        """155: HitVelSet x e y, gravidade do char a cada tick, ctrl no airguard.ctrltime e
+        pouso (52) quando toca o chão; sem HitOver."""
+        if d.sub == "shake" and d.shake <= 0:
+            d.sub, d.st = "slide", 0
+        if d.sub == "slide":
+            if d.st == 0:
+                d.vel = list(d.hitvel)
+            if d.st == d.ctrltime:
+                d.ctrl = True
             d.vel[1] += self.const("movement.yaccel") or 0.44
             if d.pos[1] >= 0 and d.vel[1] > 0:
-                d.pos[1] = 0.0
-                d.state, d.vel, d.t = "down", [0.0, 0.0], 0
-        elif d.state == "down" and d.t > 60:
-            d.state = "stand"
+                d.state, d.sub, d.vel, d.pos[1], d.ctrl = "stand", "", [0.0, 0.0], 0.0, True
+                d.airguard = False
+                return
+            d.pos[0] += d.vel[0]
+            d.pos[1] += d.vel[1]
+            d.st += 1
+        self._tick_hit_timers(d)
+
+    def _recover(self, d: Dummy) -> None:
+        """O P2 sai do acerto (MoveType deixa de ser H): o combo, o juggle e o fallflag zeram."""
+        d.combo, d.hitid, d.fall = 0, -1, False
+        d.def_mul = 1.0
+        d.juggle.clear()
+
+    def _tick_hit_timers(self, d: Dummy) -> None:
+        if d.shake > 0:
+            d.shake -= 1
+        if d.shake <= 0 and d.hittime >= 0:
+            d.hittime -= 1
+
+    def _step_air(self, d: Dummy) -> None:
+        """common1 5020/5030/5035 (voa com o hitvelset e a gravidade do HitDef), 5040 (sem
+        fall: recupera no ar no HitOver e pousa) e 5050 (fall: cai até o chão)."""
+        gl = self.const("movement.air.gethit.groundlevel")
+        if d.sub == "shake" and d.shake <= 0:          # HitShakeOver
+            d.sub, d.st = "fly", 0
+        if d.sub == "fly":
+            if d.st == 0:
+                d.vel = list(d.hitvel)
+            else:
+                d.vel[1] += d.yaccel
+            if d.hittime < 0 or d.vel[1] > 0 and d.pos[1] >= gl:
+                d.sub, d.st = ("falling" if d.fall else "recover"), 0
+                if not d.fall:
+                    d.state = "air"
+        elif d.sub in ("falling", "recover") and d.st > 0:
+            d.vel[1] += d.yaccel
+        if d.sub == "recover":
+            if d.hittime < 0 and not d.ctrl:           # HitOver: ctrl e MoveType I no ar
+                d.ctrl = True
+                self._recover(d)
+            if d.vel[1] > 0 and d.pos[1] >= 0:         # pousa (52)
+                d.state, d.sub, d.vel, d.pos[1], d.ctrl = "stand", "", [0.0, 0.0], 0.0, True
+                if d.combo:
+                    self._recover(d)
+                return
+        elif d.sub == "falling" and d.vel[1] > 0 and d.pos[1] >= gl:
+            d.state, d.sub, d.st = "down", "bounce", 0  # 5100: bate no chão
+            self._step_down(d, landed=True)
+            return
+        if d.sub != "shake":
+            d.pos[0] += d.vel[0]
+            d.pos[1] += d.vel[1]
+            d.st += 1
+        self._tick_hit_timers(d)
+
+    def _anim_len(self, n: int, dft: int) -> int:
+        a = self.char.anims.get(n)
+        return a.total_time if a is not None and a.total_time > 0 else dft
+
+    def _step_down(self, d: Dummy, landed: bool = False) -> None:
+        """5100 (bate e para, posfreeze), 5101 (quica com fall.yvelocity), 5110 (deitado
+        liedown.time ticks) e 5120 (levanta, já sem MoveType H e sem poder apanhar)."""
+        if d.sub == "bounce":
+            if d.st == 0:
+                d.pos[1], d.vel = 0.0, [d.vel[0] * 0.75, 0.0]
+                if not d.fallvel[1]:
+                    d.sub, d.st = "lie", 0
+            if d.sub == "bounce":
+                if d.st == 1:                          # 5100, time = 1: fall.defence_up
+                    d.def_mul *= (100 + self.const("data.fall.defence_up")) / 100
+                if d.st >= self._anim_len(5100, 3) - 1:   # AnimTime = 0
+                    d.sub, d.st = "bounce2", 0
+                else:
+                    d.st += 1
+                    return self._tick_hit_timers(d)
+        if d.sub == "bounce2":
+            if d.st == 0:
+                # HitFallVel: fall.xvelocity é local do P2 (positivo = para a frente dele)
+                d.vel = [d.vel[0] if d.fallvel[0] is None else d.fallvel[0] * d.facing, d.fallvel[1]]
+                d.pos[1] = self.const("movement.down.bounce.offset.y")
+            else:
+                d.vel[1] += self.const("movement.down.bounce.yaccel")
+            if d.vel[1] > 0 and d.pos[1] >= self.const("movement.down.bounce.groundlevel"):
+                d.sub, d.st = "lie", 0
+            else:
+                d.pos[0] += d.vel[0]
+                d.pos[1] += d.vel[1]
+                d.st += 1
+                return self._tick_hit_timers(d)
+        if d.sub == "lie":
+            if d.st == 0:
+                d.pos[1], d.vel[1] = 0.0, 0.0
+            d.vel[0] *= 0.85
+            if abs(d.vel[0]) < self.const("movement.down.friction.threshold"):
+                d.vel[0] = 0.0
+            if d.st >= 1 and d.down_rt <= 0:          # 5120: levanta
+                d.sub, d.st, d.vel = "getup", 0, [0.0, 0.0]
+                self._recover(d)
+            else:
+                d.pos[0] += d.vel[0]
+                d.st += 1
+                d.down_rt -= 1
+                return self._tick_hit_timers(d)
+        if d.sub == "getup":
+            if d.st >= self._anim_len(5120, 20):
+                d.state, d.sub, d.ctrl = "stand", "", True
+                return
+            d.st += 1
+
+    def _step_stun(self, d: Dummy) -> None:
+        guard = d.state == "guardhit"
+        if guard and getattr(d, "airguard", False):
+            return self._step_airguard(d)
+        if d.sub == "shake" and d.shake <= 0:          # 5000/150: HitShakeOver
+            d.sub, d.st = "slide", 0
+        if d.sub == "slide":
+            if d.st == 0:                               # 5001/151: HitVelSet
+                d.vel = [d.hitvel[0], 0.0]
+            if guard:
+                if d.st == d.slidetime or d.hittime < 0:
+                    d.vel = [0.0, 0.0]
+                if d.st == d.ctrltime:
+                    d.ctrl = True
+            elif d.st >= d.slidetime:
+                d.vel[0] *= 0.6
+            if d.hittime < 0:                           # HitOver: volta ao parado com ctrl
+                d.state, d.vel, d.sub, d.ctrl = "stand", [0.0, 0.0], "", True
+                d.shake = 0
+                if not guard:
+                    d.combo, d.hitid = 0, -1
+                return
+            d.pos[0] += d.vel[0]
+            fr = self.const("movement.stand.friction") or 0.85
+            d.vel[0] *= fr                              # physics S (o boneco é um char em pé)
+            if abs(d.vel[0]) < self.lc_ratio:
+                d.vel[0] = 0.0
+            d.st += 1
+        if d.shake > 0:
+            d.shake -= 1
+        if d.shake <= 0 and d.hittime >= 0:
+            d.hittime -= 1
 
     # ---- passo
     def step(self):
@@ -1405,13 +2539,23 @@ class Sim:
         for ent in moving:
             ent.frozen = False
             ent.push_off = False
+            ent.pos_frozen = False
+            ent.width_player = (0.0, 0.0)
+            if not ent.hitpause:                  # Ikemen: o padrão volta fora da pausa do acerto
+                ent.screenbound = (True, True)
             if ent.started:
                 if ent.hitpause > 0:
                     ent.hitpause -= 1
                     ent.frozen = True
                 else:
-                    ent.time += 1
-                    ent.anim_t += 1
+                    if ent.hold_time:
+                        ent.hold_time = False
+                    else:
+                        ent.time += 1
+                    if ent.hold_anim:
+                        ent.hold_anim = False
+                    else:
+                        ent.anim_t += 1
             ent.started = True
         for ent in moving:
             self.run_entity(ent)
@@ -1437,12 +2581,14 @@ class Sim:
         for ent in moving:
             if not ent.alive or ent.frozen:
                 continue
-            if not (starts and ent.pausemove <= 0):
+            if not (starts and ent.pausemove <= 0) and not getattr(ent, "pos_frozen", False):
                 ent.pos[0] += ent.vel[0] * ent.facing
                 ent.pos[1] += ent.vel[1]
             if ent.physics == "A":
                 ent.vel[1] += self.const("movement.yaccel") or 0.44
-                if ent.pos[1] >= 0 and ent.vel[1] > 0 and not ent.is_helper:
+                # o Ikemen pousa qualquer char com physics A, helper também (estado 52 do dono)
+                if ent.pos[1] >= 0 and ent.vel[1] > 0 and ent.stateno != 105 \
+                        and self.statedef(52) is not None:
                     ent.pos[1] = 0.0
                     ent.vel = [ent.vel[0], 0.0]
                     self.enter(ent, 52)
@@ -1461,18 +2607,33 @@ class Sim:
                 ent.movecontact += 1
                 ent.movehit += bool(ent.movehit)
                 ent.moveguarded += bool(ent.moveguarded)
+        # o P2 roda o tick dele (actionRun) antes da colisão, como no Ikemen: o HitOver deste
+        # tick já vale para o acerto deste tick
+        if not paused:
+            self.step_dummy()
+        self.screen_clamp()                       # update(): preso à tela antes da câmera
+        self.step_projectiles(paused)             # charUpdate: os projéteis andam antes da colisão
         # como no Ikemen (collisionDetection): primeiro os corpos se empurram, depois os acertos
         if not self.p1.frozen and self.p1 in moving:
             self.push_players()
+            self.screen_clamp()
         for ent in moving:
             if ent.alive and not ent.frozen:
                 self.check_hits(ent)
+        for q in self.projs:
+            if q.alive and not q.frozen:
+                self.check_hits(q)
+        self.tick_projectiles(paused)
+        self.step_camera()
+        b = self.p2.bind
+        if b is not None and not paused and b["time"] > 0:
+            b["time"] -= 1
+            if b["time"] == 0:
+                self.p2.bind = None
         for ent in moving:
             ent.hit_now = False
             if paused:
                 ent.pausemove -= 1
-        if not paused:
-            self.step_dummy()
         ends_at: dict[int, int | None] = {}      # anim → tick em que a explod sai (None = nunca)
         for e in self.live_explods:
             if not e.alive:
@@ -1482,12 +2643,15 @@ class Sim:
                     continue
                 e.pausemove -= 1
             if e.bind_to is not None and (e.bindtime < 0 or e.t < e.bindtime):
-                b = e.bind_to
-                e.pos = [b.pos[0] + e.offset[0] * b.facing, b.pos[1] + e.offset[1]]
+                b = e.bind_to                      # o x já veio virado pelo lado do nascimento
+                e.pos = [b.pos[0] + e.offset[0], b.pos[1] + e.offset[1]]
             elif e.t > 0:
-                e.pos[0] += e.vel[0] * e.facing
+                e.pos[0] += e.vel[0] * e.move_facing
                 e.pos[1] += e.vel[1]
-                e.vel = (e.vel[0] + e.accel[0], e.vel[1] + e.accel[1])
+                # Ikemen: vel = vel * friction + accel; com atrito, abaixo de 0,1 para
+                fr = e.friction
+                v = [e.vel[0] * fr[0] + e.accel[0], e.vel[1] * fr[1] + e.accel[1]]
+                e.vel = tuple(0.0 if abs(v[i]) < 0.1 and abs(fr[i]) < 1 else v[i] for i in (0, 1))
             if e.anim not in ends_at:
                 a = self.char.anims.get(e.anim)
                 # só um quadro de tempo -1 segura a anim para sempre; tempo 0 (comum no último
@@ -1497,7 +2661,7 @@ class Sim:
                 ends_at[e.anim] = (0 if a is None else
                                    tt if tt > 0 and all(f.time >= 0 for f in a.frames) else None)
             end = ends_at[e.anim]
-            if e.removetime == -2 and end is not None and e.t >= end:
+            if e.removetime == -2 and end is not None and e.t - e.anim_t0 >= end:
                 e.alive = False
             elif e.removetime >= 0 and e.t > e.removetime:
                 e.alive = False
@@ -1541,14 +2705,15 @@ class Sim:
                 self.chain_step()
             if until_idle and self.p1.stateno in (0, 52, 11, 20) and self.tick > 5 \
                     and not any(h.alive for h in self.helpers) and not self.live_explods \
-                    and self.p2.state in ("stand", "down"):
+                    and not self.projs and (self.p2.state == "stand" or
+                                            self.p2.state == "down" and self.p2.sub == "lie"):
                 break
         return self
 
     # ---- registro de cada tick (para desenhar e medir)
     def snapshot(self):
         ents = []
-        for ent in [self.p1] + self.helpers:
+        for ent in [self.p1] + self.helpers + self.projs:
             if not ent.alive or ent.screen:
                 continue
             f = ent.frame()
@@ -1562,23 +2727,24 @@ class Sim:
                                     ent.scale[1] * (ent.draw_scale or (1, 1))[1]),
                              angle=ent.draw_angle or 0.0,
                              inv=inv, trans=ent.trans, alpha=ent.alpha, clsn1=self.boxes(ent, "1"),
-                             clsn2=self.boxes(ent, "2"), helper=ent.is_helper,
+                             clsn2=self.boxes(ent, "2"), helper=ent.is_helper or ent.proj is not None,
                              stype=ent.statetype, hd=bool(ent.hitdef) and not ent.hitdef_hit,
-                             atk=bool(ent.hitdef),
+                             # o projétil não entra no preparo/ativo do P1 (frame data do corpo)
+                             atk=bool(ent.hitdef) and ent.proj is None, proj=ent.proj is not None,
                              guardflag=(ent.hitdef or {}).get("params", {}).get("guardflag", "").upper()))
         exps, scr = [], []
         for e in self.live_explods:
             if e.alive and e.space == "screen":
                 # cut-in, camadas da cena: fora das medidas do palco, mas a folha tick a tick
                 # desenha (em coordenadas da tela 320x240)
-                f = frame_at(self.char, e.anim, e.t)
+                f = frame_at(self.char, e.anim, e.t - e.anim_t0)
                 if f is not None:
                     scr.append(dict(anim=e.anim, frame=f, pos=(e.pos[0] - self.origin_x + 160, e.pos[1] + 40),
                                     facing=e.facing, scale=e.scale, angle=e.angle, spr=e.spr,
                                     trans=e.trans, alpha=e.alpha, label=e.label))
             if not e.alive or e.space == "screen":       # cut-in e linhas na tela: fora da folha do palco
                 continue
-            f = frame_at(self.char, e.anim, e.t)
+            f = frame_at(self.char, e.anim, e.t - e.anim_t0)
             if f is None:
                 continue
             exps.append(dict(anim=e.anim, frame=f, pos=tuple(e.pos), facing=e.facing,
@@ -1591,9 +2757,14 @@ class Sim:
                                        facing=self.p2.facing, shake=self.p2.shake,
                                        pose=self.p2.pose, guard=self.p2.guard,
                                        # pode agir: parado, ou na defesa depois do guard.ctrltime
+                                       # (ou no ar depois do HitOver: 5040 devolve o ctrl)
                                        ctrl=self.p2.state == "stand" or (
-                                           self.p2.state == "guardhit" and not self.p2.shake
-                                           and self.p2.ctrltime <= 0 and not self.p2.custom)),
+                                           self.p2.state in ("guardhit", "air") and self.p2.ctrl
+                                           and not self.p2.custom),
+                                       sub=self.p2.sub, hittime=self.p2.hittime,
+                                       frame=self.p2_run.frame() if self.p2_run else None,
+                                       custom=self.p2.custom,
+                                       combo=self.p2.combo),
                                p2box=self.p2_box(),
                                pause=self.pause > 0,
                                paused=getattr(self, "_paused_at_start", False),
@@ -1768,8 +2939,8 @@ def render_tick(sim: Sim, rec: dict, window, zoom=2, boxes=True, show_p2=True):
     items = []
     if show_p2:
         p2 = rec["p2"]
-        f = next((f for k in p2_keys(p2["state"], p2.get("pose", "stand"))
-                  if (f := frame_at(sim.char, P2_ANIM.get(k, 0), 0)) is not None), None)             or frame_at(sim.char, 0, 0)
+        f = p2.get("frame") or next((f for k in p2_keys(p2["state"], p2.get("pose", "stand"))
+                                     if (f := frame_at(sim.char, P2_ANIM.get(k, 0), 0)) is not None), None)             or frame_at(sim.char, 0, 0)
         im, ax, ay = _frame_img(sim.char, f)
         if im is not None:
             items.append((-50, "p2", (_gray(im), ax, ay, p2["pos"][0] + (2 if p2["shake"] % 2 else 0),
@@ -2317,7 +3488,10 @@ def chain_report(sim: Sim) -> dict:
     broke = None
     prev = None
     for h in hits:
-        if prev is not None and (h["kind"] == "defesa" or any(prev["t"] < t < h["t"] for t in free_at)):
+        # o acerto traz o combo do P2 (o P2 pode voltar ao parado e apanhar no mesmo tick)
+        restarted = h.get("combo") is not None and h["combo"] <= h.get("numhits", 1)
+        if prev is not None and (h["kind"] == "defesa" or restarted
+                                 or any(prev["t"] < t < h["t"] for t in free_at)):
             if broke is None:
                 broke = {"t": h["t"], "state": h.get("root_state", h.get("state"))}
             run = 0
@@ -2384,11 +3558,11 @@ def move_states(char) -> list[int]:
 def damage_report(sim) -> dict:
     """Dano do golpe simulado: cada acerto e defesa (dano, energia, pausa, tempo de golpe,
     atributo) e os totais, com a vida que sobra ao boneco (de 1000)."""
-    rows = [e for e in sim.events if e["kind"] in ("acerto", "defesa")]
+    rows = [e for e in sim.events if e["kind"] in ("acerto", "defesa", "vida")]
     hits = [e for e in rows if e["kind"] == "acerto"]
     total = sum(e.get("dealt", 0) for e in rows)
-    return {"rows": rows, "hits": len(hits), "guards": len(rows) - len(hits), "total": total,
-            "life": 1000 - total, "percent": round(total / 10, 1),
+    return {"rows": rows, "hits": len(hits), "guards": sum(e["kind"] == "defesa" for e in rows), "total": total,
+            "life": max(0, 1000 - total), "percent": round(total / 10, 1),
             "p1power": sum(e.get("p1power", 0) for e in rows),
             "p2power": sum(e.get("p2power", 0) for e in rows)}
 
@@ -2396,4 +3570,4 @@ def damage_report(sim) -> dict:
 def life_at(sim, t: int) -> int:
     """Vida do boneco no tick t (antes de qualquer acerto, 1000)."""
     return 1000 - sum(e.get("dealt", 0) for e in sim.events
-                      if e["kind"] in ("acerto", "defesa") and e["t"] <= t)
+                      if e["kind"] in ("acerto", "defesa", "vida") and e["t"] <= t)

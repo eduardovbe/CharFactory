@@ -91,7 +91,10 @@ P2_MODES = [(tr("Standing still"), "stand", False), (tr("Standing guard"), "stan
 
 # cor de cada tipo de marcador da linha do tempo
 MARK_COLORS = {"acerto": "#f85149", "defesa": "#388bfd", "som": "#d29922", "explod": "#a371f7",
-               "helper": "#db61a2", "projectile": "#db61a2"}
+               "helper": "#db61a2", "projectile": "#db61a2",
+               # faixa P2: tremor, recuo, defesa, no ar, no chão e a volta ao parado
+               "p2_shake": "#e3b341", "p2_stun": "#f0883e", "p2_guard": "#388bfd",
+               "p2_air": "#bc8cff", "p2_down": "#6e7681", "p2_state": "#db61a2", "p2_free": "#3fb950"}
 
 
 class MoveTimeline(QWidget):
@@ -789,7 +792,12 @@ class SimulatorPage(QWidget):
         self.ask_btn.setEnabled(True)
         guards = sum(1 for e in sim.events if e["kind"] == "defesa")
         hits = sum(1 for e in sim.events if e["kind"] == "acerto")
+        from ...tools import simulate as _sim
+        cr = _sim.chain_report(sim)
         self.info.setText(tr("{0} ticks · {1} hit(s)").format(sim.tick, hits)
+                          + (tr(" · combo {0}").format(cr["combo"]) if hits > 1 else "")
+                          + (tr(" · P2 recovered before the hit at t{0}").format(cr["broke"]["t"])
+                             if cr["broke"] and hits > 1 else "")
                           + (tr(" · {0} guard(s)").format(guards) if guards else "")
                           + (tr(" · not simulated: {0}").format(', '.join(sorted(set(map(str, sim.unsupported))))[:120])
                              if sim.unsupported else ""))
@@ -820,7 +828,9 @@ class SimulatorPage(QWidget):
             if ev["kind"] == "ctrl" and ev.get("value") == "playsnd" and snd:
                 txt = tr("sound {0}{1},{2}").format('F' if snd[2] else '', snd[0], snd[1])
             elif ev["kind"] in ("estado", "acerto", "defesa", "pausa", "helper", "explod"):
-                txt = {"estado": tr("state {0}").format(ev.get('value')), "acerto": tr("HIT {0}").format(ev.get('label', '')),
+                txt = {"estado": tr("state {0}").format(ev.get('value')),
+                       "acerto": tr("HIT {0}").format(ev.get('label', ''))
+                       + (tr(" · combo {0}").format(ev["combo"]) if ev.get("combo") else ""),
                        "defesa": tr("GUARD {0}").format(ev.get('label', '')),
                        "pausa": f"pausa {ev.get('value')}", "helper": f"helper {ev.get('value')}",
                        "explod": f"explod anim {ev.get('value')}"}[ev["kind"]]
@@ -901,7 +911,7 @@ class SimulatorPage(QWidget):
         rows = []
         for e in r["rows"]:
             hit = e["kind"] == "acerto"
-            kind = tr("hit") if hit else tr("guard")
+            kind = tr("hit") if hit else tr("guard") if e["kind"] == "defesa" else "TargetLifeAdd"
             rows.append("<tr>" + "".join(f"<td>{v}</td>" for v in (
                 e["t"], kind, e.get("dealt", 0), f"+{e.get('p1power', 0)}", "/".join(map(str, e.get("pause", []))),
                 e.get("hittime", ""), e.get("attr", ""))) + "</tr>")
