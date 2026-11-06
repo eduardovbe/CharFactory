@@ -259,6 +259,8 @@ class Entity:
             return sum(1 for q in s.projs if q.alive and q.parent is self and q.proj["status"] == "active"
                        and (name == "numproj" or q.proj["id"] == arg))
         if name == "numtarget":
+            if arg is not None and not s._target_id_ok(int(arg)):
+                return 0
             return 1 if (self.movehit or (self.root and self.root.movehit)) and s.p2.state != "stand" else 0
         if name == "numhelper":
             return sum(1 for h in s.helpers if h.alive and (arg is None or h.helper_id == arg))
@@ -730,6 +732,9 @@ CTRL_LOGGED = {"playsnd", "envshake", "palfx", "bgpalfx", "allpalfx", "envcolor"
                "assertspecial", "targetbind", "bindtotarget", "targetstate", "posadd", "posset",
                "turn", "superpause", "pause", "projectile", "angledraw", "makedust",
                "reversaldef", "hitoverride", "screenbound"}
+# controladores que agem nos alvos (o id escolhe o alvo pelo id do HitDef que o acertou)
+TARGET_CTRLS = {"targetbind", "bindtotarget", "targetstate", "targetvelset", "targetveladd",
+                "targetfacing", "targetlifeadd", "targetpoweradd"}
 
 
 class Sim:
@@ -1066,6 +1071,11 @@ class Sim:
             e.setdefault("ci", c.get("index"))
         return res
 
+    def _target_id_ok(self, i: int) -> bool:
+        """Filtro de id dos controladores de alvo e do NumTarget(id), como o getTarget do
+        Ikemen: id < 0 vale para todos; senão só o alvo acertado por um HitDef com esse id."""
+        return i < 0 or self.p2.hitid == i
+
     def _exec(self, ent: Entity, c: dict):
         typ = c.get("type", "")
         p = c["params"]
@@ -1074,6 +1084,8 @@ class Sim:
             r = self._p2_exec(ent, typ, p, g)
             if r is not None:
                 return r
+        if typ in TARGET_CTRLS and "id" in p and not self._target_id_ok(int(g("id", -1))):
+            return                                # Ikemen getTarget(id): só alvos do HitDef de id
         if typ in CTRL_LOGGED:     # o que dá peso e leitura ao golpe (nota de qualidade)
             self.events.append({"t": self.tick, "who": ent.name, "kind": "ctrl", "value": typ,
                                 "label": c.get("label", ""), "state": ent.stateno,
@@ -1823,6 +1835,7 @@ class Sim:
             return
         h = Entity(self, f"helper {int(g('id', 0))}", int(g("stateno", 0)))
         h.is_helper = True
+        h.screenbound = (False, False)
         h.helper_id = int(g("id", 0))
         self._next_pid = getattr(self, "_next_pid", P2_ID) + 1
         h.pid = self._next_pid
@@ -2006,6 +2019,9 @@ class Sim:
         p1 = self.p1
         if p1.screenbound[0]:
             p1.pos[0] = min(max(p1.pos[0], lo), hi)
+        for h in self.helpers:                    # helper com ScreenBound value = 1 neste tick
+            if h.alive and h.screenbound[0]:
+                h.pos[0] = min(max(h.pos[0], lo), hi)
         r = self.p2_run
         if r is not None and r.alive and self.p2.custom:
             if r.screenbound[0]:
@@ -2542,7 +2558,8 @@ class Sim:
             ent.pos_frozen = False
             ent.width_player = (0.0, 0.0)
             if not ent.hitpause:                  # Ikemen: o padrão volta fora da pausa do acerto
-                ent.screenbound = (True, True)
+                # só os jogadores ficam presos à tela por padrão; helper só com ScreenBound
+                ent.screenbound = (True, True) if ent is self.p1 else (False, False)
             if ent.started:
                 if ent.hitpause > 0:
                     ent.hitpause -= 1

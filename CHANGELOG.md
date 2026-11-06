@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Simulator: target controllers and `NumTarget` respect the HitDef `id`.
+- Simulator: helpers stay on screen only with `ScreenBound`.
 - Character files whose case differs from the `.def` now open on Linux.
 - Simulator: P2 hitstun and guard stun last as long as in Ikemen GO, so multi-hit supers count as one combo (#11).
 - Simulator: a state entered during hitpause runs its `Time = 0` once, fixing projectiles that never stopped hitting (#11).

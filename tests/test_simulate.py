@@ -797,3 +797,41 @@ def test_gethitvar_xvel_is_in_world_space(tmp_path):
         "[State 9990, fim]\ntype = SelfState\ntrigger1 = time >= 10\nvalue = 0\n"))
     sim = simulate.Sim(c, 9970, p2_dist=30, max_ticks=12).run(until_idle=False)
     assert sim.p2.pos[0] > 30 + 40                         # 6 px/tick para longe do P1
+
+
+def test_target_controllers_respect_the_hitdef_id(tmp_path):
+    """TargetBind/TargetState com id só agem no alvo acertado por um HitDef desse id (getTarget
+    do Ikemen); NumTarget(id) idem. O raio do Zakeru (Zeno Bell) prendia o P2 com um id errado
+    e o simulador contava 1 acerto onde o motor dá vários."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, hd]\ntype = HitDef\ntrigger1 = time = 0\nattr = S, NA\ndamage = 10\n"
+        "pausetime = 0, 0\nground.velocity = -4\nground.hittime = 20\nid = 10\nsparkno = -1\n\n"
+        "[State 9970, conta]\ntype = VarSet\ntrigger1 = movehit\nvar(1) = numtarget(99)\n"
+        "var(2) = numtarget(10)\n\n"
+        "[State 9970, prende]\ntype = TargetBind\ntrigger1 = movehit\nid = 99\npos = 0, -60\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 20\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.Sim(c, 9970, p2_dist=30, max_ticks=15).run(until_idle=False)
+    assert sim.p1.vars[1] == 0 and sim.p1.vars[2] == 1
+    assert all(r["p2"]["pos"][1] == 0 for r in sim.track)      # nunca foi preso no ar
+
+
+def test_helper_screenbound(tmp_path):
+    """Helper só fica preso à tela com ScreenBound value = 1 (no Ikemen só os jogadores têm
+    screenbound por padrão); sem ele o helper sai da tela."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = I\nphysics = S\nanim = 0\nctrl = 0\n\n"
+        "[State 9970, a]\ntype = Helper\ntrigger1 = time = 0\nstateno = 9971\nID = 1\n\n"
+        "[State 9970, b]\ntype = Helper\ntrigger1 = time = 0\nstateno = 9972\nID = 2\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 60\nvalue = 0\nctrl = 1\n"))
+    for n, sb in ((9971, "1"), (9972, "0")):
+        ops.set_statedef_text(c, n, (
+            f"[Statedef {n}]\ntype = S\nmovetype = I\nphysics = N\nanim = 0\nvelset = 20, 0\n\n"
+            f"[State {n}, sb]\ntype = ScreenBound\ntrigger1 = 1\nvalue = {sb}\n"))
+    sim = simulate.Sim(c, 9970, p2_dist=30, max_ticks=40).run(until_idle=False)
+    held, free = (next(h for h in sim.helpers if h.helper_id == i) for i in (1, 2))
+    assert held.pos[0] <= sim.xmax + 1e-6 < free.pos[0]
