@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-09
+
 ### Added
 
 - macOS and Linux support, with downloads for both in the release.
@@ -19,10 +21,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Simulator: `BindToTarget`, `TargetFacing`, `TargetVelAdd`, `PosFreeze`, `AttackMulSet`, `TargetLifeAdd` and Explod `friction`.
 - Simulator: `ModifyExplod`, `ExplodBindTime`, `Width`, `HitAdd`, `AngleAdd`, `AngleMul` and `PowerSet`.
 - Simulator: air guard (154/155) with `airguard.velocity` and `airguard.ctrltime`.
+- Animations: Alt+G (or the button on the frame) opens the frame's sprite in Sprites.
+- States: Alt+G (or right-click on a state) opens the state's animation.
 - Simulator: screen edges and camera; players stay on screen and `BackEdgeDist`, `FrontEdgeDist`, `ScreenPos` and `ScreenBound` work.
+
+### Changed
+
+- Onion skin: the section is open, with an Enable box.
 
 ### Fixed
 
+- The animation preview in States was blank for animations with transparency.
 - Simulator: target controllers and `NumTarget` respect the HitDef `id`.
 - Simulator: helpers stay on screen only with `ScreenBound`.
 - Character files whose case differs from the `.def` now open on Linux.
@@ -334,7 +343,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/eduardovbe/CharFactory/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/eduardovbe/CharFactory/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/eduardovbe/CharFactory/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/eduardovbe/CharFactory/compare/v0.4.0...v0.4.5
