@@ -130,6 +130,9 @@ class CodePage(QWidget):
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemClicked.connect(self.on_tree)
+        if kind == "states":
+            self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.tree.customContextMenuRequested.connect(self._tree_menu)
         self.tree.itemExpanded.connect(lambda it: self._remember(it, True))
         self.tree.itemCollapsed.connect(lambda it: self._remember(it, False))
         self.tree.setIndentation(14)
@@ -239,9 +242,30 @@ class CodePage(QWidget):
         QShortcut(QKeySequence("Ctrl+Return"), self, self.apply_current)
         if kind in ("states", "cmd"):
             QShortcut(QKeySequence("Ctrl+Shift+Space"), self, self.edit_controller)
+        if kind == "states":
+            QShortcut(QKeySequence("Alt+G"), self, self.goto_anim).setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut)
         ctx.characterChanged.connect(self.on_character)
         ctx.themeChanged.connect(self.on_theme)
         ctx.modelChanged.connect(self.on_model)
+
+    def goto_anim(self) -> None:
+        """Abre na aba Animações a ação do estado onde está o cursor."""
+        n = getattr(self, "_preview_anim", None)
+        if n is None:
+            self.ctx.status.emit(tr("No animation in this state"))
+            return
+        self.ctx.request_definition.emit("anim", n, 0)
+
+    def _tree_menu(self, pos) -> None:
+        it = self.tree.itemAt(pos)
+        n = it.data(0, ROLE_ANIM) if it is not None else None
+        if n is None:
+            return
+        m = QMenu(self.tree)
+        m.addAction(icon("external"), tr("Go to animation {0}").format(n),
+                    lambda: self.ctx.request_definition.emit("anim", n, 0))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _preview_toggled(self, on: bool) -> None:
         if on:
@@ -280,6 +304,7 @@ class CodePage(QWidget):
         # o atalho vai depois do \t só como texto: quem responde ao atalho é o menu Estados
         for entry in [
             ("wizard", tr("Visual move wizard…\tCtrl+Shift+M"), lambda: self.ctx.request_tool.emit("wizard")),
+            ("external", tr("Go to this state's animation	Alt+G"), self.goto_anim),
             None,
             ("palfx", tr("PalFX editor…\tAlt+P"), lambda: self.ctx.request_tool.emit("palfx")),
             ("offset", tr("Offset viewer…\tAlt+O"), lambda: self.ctx.request_tool.emit("offset")),

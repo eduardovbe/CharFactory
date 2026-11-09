@@ -145,7 +145,10 @@ def paste_blended(canvas: Image.Image, img: Image.Image, pos: tuple[int, int], t
     region = np.asarray(canvas.crop((l, t, r, b)).convert("RGBA"), dtype=np.float32) / 255
     src = np.asarray(img.crop((l - x, t - y, r - x, b - y)).convert("RGBA"), dtype=np.float32) / 255
     out = blend_layer(region[..., :3], src, trans)
-    rgba = np.concatenate([out, region[..., 3:4]], axis=-1)
+    # fundo transparente (a prévia): o sprite com transparência não pode sumir, então o alfa
+    # do resultado soma o do sprite; em fundo opaco continua igual
+    ra = region[..., 3:4]
+    rgba = np.concatenate([out, ra + src[..., 3:4] * (1 - ra)], axis=-1)
     canvas.paste(Image.fromarray((rgba * 255 + 0.5).astype("uint8"), "RGBA"), (l, t))
 
 

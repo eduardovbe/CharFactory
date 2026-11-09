@@ -5,6 +5,7 @@ import copy
 import re
 
 from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
                                QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QSizePolicy, QSlider, QSplitter, QVBoxLayout,
@@ -111,7 +112,8 @@ class AnimationEditor(QWidget):
         ], 18)
         # onion skin começa desligado e lembra a escolha ("onion_on": a chave antiga "onion" já
         # vinha gravada como ligada no config de todo mundo)
-        self.onion = QCheckBox(tr("Show"))
+        self.onion = QCheckBox(tr("Enable"))
+        self.onion.setToolTip(tr("Show the previous frame (or a frame of another animation) faded behind the sprite"))
         self.onion.setChecked(bool(ctx.settings.get("onion_on", False)))
         self.onion.toggled.connect(self._onion_toggled)
         self.onion_action = None             # botão da barra de cima (o app recria a cada troca de página)
@@ -161,7 +163,9 @@ class AnimationEditor(QWidget):
         frame_sec.head.setMinimumWidth(60)
         for b in (tool_button("add_frame", tr("Add frame (Ctrl+Shift+A)"), self.add_frame, size=16),
                   tool_button("duplicate", tr("Duplicate frame"), self.dup_frame, size=16),
-                  tool_button("delete", tr("Delete frame (Ctrl+Shift+Del)"), self.del_frame, size=16)):
+                  tool_button("delete", tr("Delete frame (Ctrl+Shift+Del)"), self.del_frame, size=16),
+                  tool_button("goto", tr("Go to this frame's sprite in the Sprites tab (Alt+G)"),
+                              self.goto_sprite, size=16)):
             frame_sec.add_header_widget(b)
         self.frame_nav.setToolTip(tr("Choose the frame (arrows: previous/next). It does not change its time or position."))
         frame_sec.add(self.frame_nav, self.gi,
@@ -199,7 +203,7 @@ class AnimationEditor(QWidget):
                     hint_label(tr("Turn on red (attack) or blue (collision) and drag on the canvas. Drag a box to move "
                                   "it, its edges to resize; Del deletes.")))
 
-        onion_sec = Section(tr("Onion skin"), "anims.onion", collapsed=True)
+        onion_sec = Section(tr("Onion skin"), "anims.onion")
         self.onion_other = QWidget()
         oo = QVBoxLayout(self.onion_other)
         oo.setContentsMargins(0, 0, 0, 0)
@@ -221,6 +225,8 @@ class AnimationEditor(QWidget):
         lv.addWidget(hint_label(tr("Ctrl+drag the sprite changes the offset; arrows move 1 px (Shift: 10).")))
         lv.addStretch()
         self.left = SidePanel(tr("Animations"), content, header=False)
+        QShortcut(QKeySequence("Alt+G"), self, self.goto_sprite).setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         # ------------------------------------------------ centro
         self.file_tab = DocStrip()
@@ -307,6 +313,13 @@ class AnimationEditor(QWidget):
         nums = self.numbers()
         i = self.nav.index()
         return self.char.anims.get(nums[i]) if 0 <= i < len(nums) else None
+
+    def goto_sprite(self) -> None:
+        """Abre na aba Sprites o sprite (grupo,índice) do frame atual."""
+        f = self.frame()
+        if f is None:
+            return
+        self.ctx.request_definition.emit("sprite", f.group, f.item)
 
     def frame(self) -> air.Frame | None:
         a = self.action()
