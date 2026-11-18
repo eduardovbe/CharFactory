@@ -372,7 +372,6 @@
  "Clear list": "Vider la liste",
  "Clear repeated colors": "Effacer les couleurs répétées",
  "Clear selection": "Effacer la sélection",
- "Click a frame to select it (arrows: previous/next). Drag the right edge of a frame to change its time (Shift+drag stretches or compresses the whole animation); drag the middle of a frame to change the order; right-click for more, including locking the timing. Esc cancels.": "Cliquez sur une image pour la sélectionner (flèches : précédente/suivante). Glissez le bord droit d'une image pour changer sa durée (Maj+glisser étire ou comprime toute l'animation) ; glissez le milieu d'une image pour changer l'ordre ; clic droit pour plus d'options, dont le verrouillage du timing. Échap annule.",
  "Click a parameter (or its ?) to see what it does. Typing a value checks it; the checked ones go into the code.": "Cliquez sur un paramètre (ou son ?) pour voir ce qu'il fait. Saisir une valeur le coche ; les cochés vont dans le code.",
  "Click a part of the sprite to select its color in the grid": "Cliquez sur une partie du sprite pour sélectionner sa couleur dans la grille",
  "Click an event to go to its tick.": "Cliquez sur un événement pour aller à son tick.",
@@ -855,7 +854,6 @@
  "Interpolate Boxes": "Interpoler les boîtes",
  "Interpolate boxes between this frame and another…": "Interpoler les boîtes entre cette image et une autre…",
  "Interpolate boxes from the current frame ({0}) to frame:": "Interpoler les boîtes de l'image actuelle ({0}) jusqu'à l'image :",
- "Interpolate to the next frame (MUGEN 1.1)": "Interpoler jusqu'à l'image suivante (MUGEN 1.1)",
  "Invalid expression: {0}": "Expression invalide : {0}",
  "Invalid input: {0}": "Entrée invalide : {0}",
  "Invert": "Inverser",
@@ -1096,7 +1094,6 @@
  "One set of palettes 2 to 12 for each style (and a mix of them); nothing is saved until you use one": "Un ensemble de palettes 2 à 12 pour chaque style (et un mélange) ; rien n'est enregistré tant que vous n'en utilisez pas un",
  "One trigger per line: triggerall = …, trigger1 = …, trigger2 = …": "Un trigger par ligne : triggerall = …, trigger1 = …, trigger2 = …",
  "Onion skin": "Pelure d'oignon",
- "Onion skin (previous frame, faded)": "Pelure d'oignon (image précédente, estompée)",
  "Onion skin animation (e.g. 0 = stand, to align)": "Animation de la pelure d'oignon (ex. 0 = debout, pour aligner)",
  "Onion skin opacity": "Opacité de la pelure d'oignon",
  "Onion skin: neighbor sprites in the group (F3)": "Pelure d'oignon : sprites voisins dans le groupe (F3)",
@@ -2200,5 +2197,8 @@
  "↑↓ navigate   Enter run   Esc close": "↑↓ naviguer   Entrée exécuter   Échap fermer",
  "→ <b>{0}</b> did not come in": "→ <b>{0}</b> n'est pas entré",
  "⏸ Pause": "⏸ Pause",
- "▶ Play": "▶ Lecture"
+ "▶ Play": "▶ Lecture",
+ "Click a frame to select it (arrows: previous/next). Drag to inspect the animation tick by tick. Drag the right edge of a frame to change its time (Shift+drag stretches or compresses the whole animation); Ctrl+drag the middle of a frame to change the order; right-click for more, including locking the timing. Esc cancels.": "Cliquez sur une frame pour la sélectionner (flèches : précédente/suivante). Faites glisser pour inspecter l'animation tick par tick. Faites glisser le bord droit d'une frame pour changer sa durée (Maj+glisser étire ou comprime toute l'animation) ; Ctrl+glisser le milieu d'une frame change l'ordre ; clic droit pour plus d'options, dont le verrouillage des durées. Échap annule.",
+ "Interpolate from the previous frame (MUGEN 1.1)": "Interpoler depuis la frame précédente (MUGEN 1.1)",
+ "Preview tick within the current frame (, and . step one tick)": "Afficher un tick dans la frame actuelle (, et . avancent d'un tick)"
 }

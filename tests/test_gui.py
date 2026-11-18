@@ -1935,8 +1935,7 @@ def test_current_frame_section_selects_without_touching_timing(gui):
 
 def test_animation_panel_order_onion_toggle_and_narrow_toolbar(gui):
     """Animação no topo, depois Frame atual (slider, grupo/índice, tempo, loop) e Posição
-    (offset, flip). Onion skin começa desligado, liga pelo botão da barra de cima (que segue a
-    caixa da seção) e tem opacidade. Com 1366 px a barra de ferramentas inteira continua à vista."""
+    (offset, flip). Onion skin começa desligado, liga só pela caixa do painel e tem opacidade. Com 1366 px a barra de ferramentas inteira continua à vista."""
     from charfactory.gui.widgets import Section
     app, ctx, win, _ = gui
     win.resize(1366, 768)
@@ -1950,11 +1949,11 @@ def test_animation_panel_order_onion_toggle_and_narrow_toolbar(gui):
     assert pos.isAncestorOf(an.offset) and pos.isAncestorOf(an.flip) and not an.frame_sec.isAncestorOf(an.offset)
     assert an.frame_sec.isAncestorOf(an.gi) and an.frame_sec.isAncestorOf(an.loop) and an.frame_sec.isAncestorOf(an.frame_nav)
     assert not an.onion.isChecked() and an.canvas.onion is None
-    an.onion_action.setChecked(True)
+    assert not any("onion" in a.text().lower() for a in win.extra.actions())
+    an.onion.setChecked(True)
     app.processEvents()
-    assert an.onion.isChecked() and ctx.settings["onion_on"] is True
+    assert an.show_frame() is None and an.onion.isChecked()
     an.onion.setChecked(False)
-    assert not an.onion_action.isChecked()
     an.onion_opacity.setValue(60)
     assert an.canvas.onion_opacity == 0.6
     ex = win.extra
@@ -2166,14 +2165,14 @@ def test_timeline_drags_frame_edges_like_a_video_editor(gui):
         assert [f.time for f in a.frames] == times
     finally:
         an.set_timeline_locked(False)
-    # arrastar o meio do 1º frame para depois do 3º muda a ordem; o início do loop segue o frame dele
+    # Ctrl+arrastar o meio do 1º frame para depois do 3º muda a ordem; o início do loop segue o frame dele
     an.show_action()
     first, third = a.frames[0], a.frames[2]
     scale = (tl.width() - tl.LEFT - 12) / sum(tl.durations)
 
     def ev(kind, x, buttons):
         pt = QPointF(x, 40)
-        return QMouseEvent(kind, pt, pt, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+        return QMouseEvent(kind, pt, pt, Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.ControlModifier)
     mid0 = tl.LEFT + times[0] * scale / 2
     drop = tl.LEFT + (sum(times[:3]) + times[3] * 0.25) * scale
     tl.mousePressEvent(ev(QEvent.Type.MouseButtonPress, mid0, Qt.MouseButton.LeftButton))

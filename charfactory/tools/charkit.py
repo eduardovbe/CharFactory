@@ -148,10 +148,11 @@ def frame_at(char: Character, anim: int, age: int):
         loop = sum(f.time for f in a.frames[a.loopstart:]) if a.loopstart else total
         pre = total - loop
         age = pre + (age - pre) % max(1, loop)
+    from .render import interpolated_frame
     t = 0
-    for f in a.frames:
+    for i, f in enumerate(a.frames):
         if f.time < 0 or age < t + f.time:
-            return f
+            return interpolated_frame(a, i, age - t)
         t += f.time
     return a.frames[-1]
 

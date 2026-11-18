@@ -372,7 +372,6 @@
  "Clear list": "清空列表",
  "Clear repeated colors": "清除重复的颜色",
  "Clear selection": "清除选区",
- "Click a frame to select it (arrows: previous/next). Drag the right edge of a frame to change its time (Shift+drag stretches or compresses the whole animation); drag the middle of a frame to change the order; right-click for more, including locking the timing. Esc cancels.": "单击帧以选中（方向键：上一帧/下一帧）。拖动帧的右边缘可改变时长（Shift+拖动会拉伸或压缩整个动画）；拖动帧的中间可调整顺序；右键查看更多选项，包括锁定时序。Esc 取消。",
  "Click a parameter (or its ?) to see what it does. Typing a value checks it; the checked ones go into the code.": "单击参数（或它的 ?）查看其作用。输入数值会自动勾选；勾选的参数会写入代码。",
  "Click a part of the sprite to select its color in the grid": "单击精灵的某个部分，在网格中选中它的颜色",
  "Click an event to go to its tick.": "单击事件跳转到对应的 tick。",
@@ -855,7 +854,6 @@
  "Interpolate Boxes": "插值碰撞框",
  "Interpolate boxes between this frame and another…": "在此帧与另一帧之间插值碰撞框…",
  "Interpolate boxes from the current frame ({0}) to frame:": "从当前帧（{0}）插值碰撞框到帧：",
- "Interpolate to the next frame (MUGEN 1.1)": "插值到下一帧（MUGEN 1.1）",
  "Invalid expression: {0}": "无效表达式：{0}",
  "Invalid input: {0}": "无效输入：{0}",
  "Invert": "反转",
@@ -1096,7 +1094,6 @@
  "One set of palettes 2 to 12 for each style (and a mix of them); nothing is saved until you use one": "每种风格（及其混合）一套调色板 2 到 12；在你使用之前不会保存任何内容",
  "One trigger per line: triggerall = …, trigger1 = …, trigger2 = …": "每行一个触发器：triggerall = …、trigger1 = …、trigger2 = …",
  "Onion skin": "洋葱皮",
- "Onion skin (previous frame, faded)": "洋葱皮（上一帧，半透明）",
  "Onion skin animation (e.g. 0 = stand, to align)": "洋葱皮动画（例如 0 = 站立，用于对齐）",
  "Onion skin opacity": "洋葱皮不透明度",
  "Onion skin: neighbor sprites in the group (F3)": "洋葱皮：组内相邻精灵（F3）",
@@ -2200,5 +2197,8 @@
  "↑↓ navigate   Enter run   Esc close": "↑↓ 浏览   回车 执行   Esc 关闭",
  "→ <b>{0}</b> did not come in": "→ <b>{0}</b> 没有接上",
  "⏸ Pause": "⏸ 暂停",
- "▶ Play": "▶ 播放"
+ "▶ Play": "▶ 播放",
+ "Click a frame to select it (arrows: previous/next). Drag to inspect the animation tick by tick. Drag the right edge of a frame to change its time (Shift+drag stretches or compresses the whole animation); Ctrl+drag the middle of a frame to change the order; right-click for more, including locking the timing. Esc cancels.": "单击帧以选中(方向键:上一帧/下一帧)。拖动可逐 tick 检查动画。拖动帧的右边缘可更改其时长(Shift+拖动可拉伸或压缩整个动画);按住 Ctrl 拖动帧的中部可更改顺序;右键单击查看更多选项,包括锁定时长。按 Esc 取消。",
+ "Interpolate from the previous frame (MUGEN 1.1)": "从上一帧插值 (MUGEN 1.1)",
+ "Preview tick within the current frame (, and . step one tick)": "预览当前帧内的某个 tick(, 和 . 逐 tick 移动)"
 }

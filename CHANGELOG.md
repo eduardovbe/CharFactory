@@ -7,8 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Animations
+
+- Dragging on the timeline inspects the animation tick by tick; Ctrl+drag changes the frame order.
+- `,` and `.` step one tick, and the panel shows the interpolated values.
+- Editing a frame keeps the inspected tick and pose.
+- Interpolated transparency follows Ikemen GO.
+- The Simulator and the States preview show interpolated animations.
+- Onion skin is only in its panel and starts off.
+
 ### Fixed
 
+- Animations: inspect interpolated poses at individual ticks using the timeline or the preview tick slider, and resume playback from the selected tick (#12).
 - States: show and edit the referenced `stcommon` CNS/ZSS file, with undo, redo and saving (#13).
 
 ## [0.5.1] - 2026-11-09

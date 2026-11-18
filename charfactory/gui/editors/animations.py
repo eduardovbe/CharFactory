@@ -56,7 +56,13 @@ class AnimationEditor(QWidget):
         self.name.setToolTip(tr("Animation name: the comment above [Begin Action] (Enter saves)"))
         self.name.editingFinished.connect(self.on_name)
         self.frame_nav = Navigator()
-        self.frame_nav.indexChanged.connect(lambda _: self.show_frame())
+        self.frame_nav.indexChanged.connect(lambda _: self.show_frame(reset_tick=True))
+        self.tick_nav = Navigator()
+        self.tick_nav.zero_based = True
+        self.tick_nav.setToolTip(tr("Preview tick within the current frame (, and . step one tick)"))
+        self.interp_info = hint_label("")    # valores da pose enquanto ela interpola
+        self.interp_info.hide()
+        self.tick_nav.indexChanged.connect(self.preview_tick)
         self.gi = GroupIndex(inline=True)
         self.gi.changed.connect(lambda g, i: self.set_field(group=g, item=i))
         self.offset = AxisEditor(tr("Offset X"), tr("Offset Y"))
@@ -110,13 +116,10 @@ class AnimationEditor(QWidget):
             None,
             ("wizard", tr("Create a move in the Wizard from this animation · Ctrl+Shift+M"), self.open_move_wizard),
         ], 18)
-        # onion skin começa desligado e lembra a escolha ("onion_on": a chave antiga "onion" já
-        # vinha gravada como ligada no config de todo mundo)
+        # onion skin: só a caixa do painel, desligada ao abrir o programa
         self.onion = QCheckBox(tr("Enable"))
         self.onion.setToolTip(tr("Show the previous frame (or a frame of another animation) faded behind the sprite"))
-        self.onion.setChecked(bool(ctx.settings.get("onion_on", False)))
-        self.onion.toggled.connect(self._onion_toggled)
-        self.onion_action = None             # botão da barra de cima (o app recria a cada troca de página)
+        self.onion.toggled.connect(lambda _: self.show_frame())
         self.onion_opacity = QSlider(Qt.Orientation.Horizontal)
         self.onion_opacity.setRange(10, 90)
         self.onion_opacity.setValue(int(ctx.settings.get("onion_opacity", 35)))
@@ -168,7 +171,7 @@ class AnimationEditor(QWidget):
                               self.goto_sprite, size=16)):
             frame_sec.add_header_widget(b)
         self.frame_nav.setToolTip(tr("Choose the frame (arrows: previous/next). It does not change its time or position."))
-        frame_sec.add(self.frame_nav, self.gi,
+        frame_sec.add(self.frame_nav, form_row(tr("Preview tick"), self.tick_nav), self.interp_info, self.gi,
                       form_row(tr("Time"), self.time, apply_btn(tr("Apply time to the next frames (Alt+Shift+T)"), "time")),
                       self.loop)
 
@@ -196,7 +199,7 @@ class AnimationEditor(QWidget):
                       self.alpha_rows,
                       form_row(tr("Scale X"), self.xs, apply_btn(tr("Apply scale and angle to the next frames"), "scale")),
                       form_row(tr("Scale Y"), self.ys, 26), form_row(tr("Angle"), self.ang, 26),
-                      field_label(tr("Interpolate to the next frame (MUGEN 1.1)")), ip)
+                      field_label(tr("Interpolate from the previous frame (MUGEN 1.1)")), ip)
 
         box_sec = Section(tr("Collision boxes"), "anims.boxes")
         box_sec.add(self.box_tools,
@@ -227,6 +230,10 @@ class AnimationEditor(QWidget):
         self.left = SidePanel(tr("Animations"), content, header=False)
         QShortcut(QKeySequence("Alt+G"), self, self.goto_sprite).setContext(
             Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        for host in (self, self.left):           # , e . andam um tick (nos campos de texto, valem para o texto)
+            for seq, d in ((",", -1), (".", 1)):
+                QShortcut(QKeySequence(seq), host, lambda d=d: self.step_tick(d)).setContext(
+                    Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         # ------------------------------------------------ centro
         self.file_tab = DocStrip()
@@ -374,7 +381,7 @@ class AnimationEditor(QWidget):
             self._show_total(tt)
             self.timeline.set_frames([f.time for f in a.frames], a.loopstart, f"{a.number}\n{self.name.text()}")
         self._quiet = False
-        self.show_frame()
+        self.show_frame(reset_tick=True)
 
     def _show_total(self, total: int) -> None:
         """Duração da animação no título de 'Animação' (no contador do slider ela cortava o
@@ -382,13 +389,18 @@ class AnimationEditor(QWidget):
         self.act_sec.head.setText(tr("Animation · {0}").format(
             tr("{0} ticks").format(total) if total >= 0 else tr("infinite")))
 
-    def show_frame(self) -> None:
+    def show_frame(self, reset_tick: bool = False) -> None:
         a, f = self.action(), self.frame()
+        if reset_tick:
+            self.tick = 0
         if not f:
             self.canvas.set_image(None)
             self.canvas.set_boxes([], [])
             return
         self._quiet = True
+        self.tick = min(self.tick, max(0, f.time - 1) if f.time >= 0 else 59)
+        self.tick_nav.set_count(max(1, f.time) if f.time >= 0 else 60)
+        self.tick_nav.set_index(self.tick)
         self.gi.set(f.group, f.item)
         self.offset.set(f.x, f.y)
         self.time.setValue(f.time)
@@ -410,25 +422,31 @@ class AnimationEditor(QWidget):
         for k, cb in self.interp.items():
             cb.setChecked(k in f.interpolate)
         self._quiet = False
-        self.timeline.current_tick = self.timeline.frame_start(self.frame_nav.index())
+        self.timeline.current_tick = self.timeline.frame_start(self.frame_nav.index()) + self.tick
         self.timeline.set_current_frame(self.frame_nav.index())
         self.timeline.update()
-        self._draw_layer(f, onion=False)
+        self._draw_pose(a)
         self._draw_onion(a)
         self.canvas.set_boxes(f.clsn1, f.clsn2)
 
-    def _onion_toggled(self, on: bool) -> None:
-        """Liga/desliga o onion skin (caixa da seção ou botão da barra de cima) e lembra."""
-        self.ctx.settings["onion_on"] = on
-        self.ctx.settings.save()
-        act = self.onion_action
-        if act is not None:
-            try:
-                if act.isChecked() != on:
-                    act.setChecked(on)
-            except RuntimeError:            # a barra foi refeita: o botão antigo já não existe
-                self.onion_action = None
-        self.show_frame()
+    def _draw_pose(self, a: air.Action) -> None:
+        """Desenha a pose do tick atual e mostra os valores que estão interpolando."""
+        i = self.frame_nav.index()
+        pose = render.interpolated_frame(a, i, self.tick)
+        self._draw_layer(pose, onion=False)
+        kinds, parts = render.interpolating(a, i), []
+        if "offset" in kinds:
+            parts.append(f"offset {pose.x},{pose.y}")
+        xs, ys, angle = render.frame_scale_angle(pose)
+        if "scale" in kinds:
+            parts.append(f"scale {xs:g},{ys:g}")
+        if "angle" in kinds:
+            parts.append(f"angle {angle:g}")
+        m = re.fullmatch(r"AS(\d+)D(\d+)", pose.trans or "") if "blend" in kinds else None
+        if m:
+            parts.append(f"alpha {m[1]},{m[2]}")
+        self.interp_info.setText(" · ".join(parts))
+        self.interp_info.setVisible(bool(parts))
 
     def _onion_opacity(self, v: int) -> None:
         self.onion_opacity_label.setText(f"{v}%")
@@ -505,7 +523,7 @@ class AnimationEditor(QWidget):
         xs, ys, an = self.xs.value(), self.ys.value(), self.ang.value()
         f.extra = [] if (xs, ys, an) == (1, 1, 0) else [f"{xs:g}", f"{ys:g}", f"{an:g}"]
         self._changed()
-        self._draw_layer(f, onion=False)
+        self.show_frame()
 
     def set_interp(self) -> None:
         f = self.frame()
@@ -513,6 +531,7 @@ class AnimationEditor(QWidget):
             return
         f.interpolate = [k for k, cb in self.interp.items() if cb.isChecked()]
         self._changed()
+        self.show_frame()
 
     def on_loop(self, on: bool) -> None:
         a = self.action()
@@ -891,13 +910,27 @@ class AnimationEditor(QWidget):
     # ------------------------------------------------------------ reprodução
 
     def on_play(self, on: bool) -> None:
-        self.tick = 0
         (self.timer.start if on else self.timer.stop)()
-        self.show_frame()
+        self.show_frame(reset_tick=False)
 
     def stop(self) -> None:
         self.play_action.setChecked(False)
         self.frame_nav.set_index(0)
+        self.show_frame(reset_tick=True)
+
+    def preview_tick(self, tick: int) -> None:
+        if self._quiet:
+            return
+        self.play_action.setChecked(False)
+        self.tick = tick
+        self.show_frame(reset_tick=False)
+
+    def step_tick(self, d: int) -> None:
+        """Anda um tick na animação inteira, passando de um frame para o outro."""
+        a = self.action()
+        if a and a.frames:
+            last = sum(max(1, f.time) if f.time >= 0 else 60 for f in a.frames) - 1
+            self.goto_tick(max(0, min(last, self.timeline.frame_start(self.frame_nav.index()) + self.tick + d)))
 
     def move_frame(self, src: int, dst: int) -> None:
         """Muda a ordem de um frame (arrastado na timeline); o início do loop segue o seu frame."""
@@ -995,7 +1028,12 @@ class AnimationEditor(QWidget):
         for i, f in enumerate(a.frames):
             d = max(1, f.time) if f.time >= 0 else 60
             if t < acc + d:
+                self.play_action.setChecked(False)
+                self.frame_nav.blockSignals(True)
                 self.frame_nav.set_index(i)
+                self.frame_nav.blockSignals(False)
+                self.tick = max(0, t - acc)
+                self.show_frame(reset_tick=False)
                 return
             acc += d
 
@@ -1003,12 +1041,19 @@ class AnimationEditor(QWidget):
         a, f = self.action(), self.frame()
         if not a or not f:
             return
-        self.tick += 1
-        self.timeline.current_tick = self.timeline.frame_start(self.frame_nav.index()) + self.tick
-        self.timeline.update()
-        if render.has_interpolation(a) and 0 < self.tick < f.time:
-            self._draw_layer(render.interpolated_frame(a, self.frame_nav.index(), self.tick), onion=False)
+        self.tick = min(self.tick + 1, 59) if f.time < 0 else self.tick + 1     # infinito: 60 ticks na régua
         if f.time >= 0 and self.tick >= max(f.time, 1):
             self.tick = 0
             i = self.frame_nav.index() + 1
+            self.frame_nav.blockSignals(True)   # um redesenho só na troca de frame
             self.frame_nav.set_index(i if i < len(a.frames) else a.loopstart)
+            self.frame_nav.blockSignals(False)
+            self.show_frame()
+            return
+        self.tick_nav.blockSignals(True)
+        self.tick_nav.set_index(self.tick)
+        self.tick_nav.blockSignals(False)
+        self.timeline.current_tick = self.timeline.frame_start(self.frame_nav.index()) + self.tick
+        self.timeline.update()
+        if render.has_interpolation(a) and 0 < self.tick < f.time:
+            self._draw_pose(a)

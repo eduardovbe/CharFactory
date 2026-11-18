@@ -810,12 +810,6 @@ class MainWindow(QMainWindow):
                 a.setCheckable(True)
                 a.setChecked(getattr(cv, attr))
                 a.toggled.connect(lambda on, at=attr, c=cv: (setattr(c, at, on), c.update()))
-            if page is self.anims:      # onion skin: liga e desliga daqui (a caixa ficava numa seção fechada)
-                a = self.extra.addAction(icon("onion"), tr("Onion skin (previous frame, faded)"))
-                a.setCheckable(True)
-                a.setChecked(page.onion.isChecked())
-                a.toggled.connect(page.onion.setChecked)
-                page.onion_action = a
             from . import backdrop
             bg = self.extra.addAction(icon("stage"), tr("Stage background: where the ground is (none, simple, MUGEN stage or image)"))
             if getattr(self, "_backdrop_menu", None) is None:      # um só, não um por troca de aba

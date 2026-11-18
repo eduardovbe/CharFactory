@@ -178,19 +178,45 @@ def frame_layer(char: Character, frame: air.Frame, palette: int | None = None, a
     return img, round(frame.x - ax), round(frame.y - ay)
 
 
+def _blend_values(trans: str) -> tuple[str, int, int]:
+    """Modo e alfas (fonte, fundo) de uma transparência do AIR, como o motor lê."""
+    t = (trans or "").strip().upper()
+    if not t:
+        return "", 256, 0
+    if t == "A1":
+        return "add", 256, 128
+    m = re.fullmatch(r"AS(\d+)(?:D(\d+))?", t)
+    if m:
+        return "add", int(m[1]), int(m[2] or 0)
+    if t.startswith("A"):
+        return "add", 256, 256
+    return ("sub", 256, 256) if t.startswith("S") else ("", 256, 0)
+
+
+def interpolating(action: air.Action, index: int) -> set[str]:
+    """O que o frame `index` interpola até o seguinte (o último vai até o loopstart). A linha
+    `Interpolate` fica no frame de destino."""
+    f = action.frames[index]
+    nxt_i = index + 1 if index + 1 < len(action.frames) else action.loopstart
+    if f.time <= 0 or nxt_i == index:
+        return set()
+    return {t.lower() for t in action.frames[nxt_i].interpolate}
+
+
 def interpolated_frame(action: air.Action, index: int, tick: int) -> air.Frame:
     """O frame `index` no tick `tick` dentro dele, com a interpolação do MUGEN 1.1 aplicada.
 
     `Interpolate Offset/Scale/Angle/Blend` antes do frame i+1 faz o frame i ir, ao longo do
-    seu tempo, dos próprios valores até os valores do frame seguinte (o último volta ao loopstart)."""
+    seu tempo, dos próprios valores até os valores do frame seguinte (o último volta ao loopstart).
+    O blend só muda em frames com soma: sem transparência o motor não interpola, e subtração
+    continua subtração."""
     f = action.frames[index]
-    nxt_i = index + 1 if index + 1 < len(action.frames) else action.loopstart
-    nxt = action.frames[nxt_i]
-    if not nxt.interpolate or f.time <= 0 or nxt_i == index:
+    kinds = interpolating(action, index)
+    if not kinds:
         return f
+    nxt = action.frames[index + 1 if index + 1 < len(action.frames) else action.loopstart]
     k = max(0.0, min(1.0, tick / f.time))
     out = copy.copy(f)
-    kinds = {t.lower() for t in nxt.interpolate}
     if "offset" in kinds:
         out.x = round(f.x + (nxt.x - f.x) * k)
         out.y = round(f.y + (nxt.y - f.y) * k)
@@ -203,11 +229,10 @@ def interpolated_frame(action: air.Action, index: int, tick: int) -> air.Frame:
             an = a[2] + (b[2] - a[2]) * k
         out.extra = [f"{xs:g}", f"{ys:g}", f"{an:g}"]
     if "blend" in kinds:
-        def src_dst(t: str) -> tuple[int, int]:
-            m = re.match(r"AS(\d+)D(\d+)", t.upper())
-            return (int(m[1]), int(m[2])) if m else (256, 0) if not t else (256, 256)
-        (s0, d0), (s1, d1) = src_dst(f.trans), src_dst(nxt.trans)
-        out.trans = f"AS{round(s0 + (s1 - s0) * k)}D{round(d0 + (d1 - d0) * k)}"
+        mode, s0, d0 = _blend_values(f.trans)
+        if mode == "add":
+            _, s1, d1 = _blend_values(nxt.trans)
+            out.trans = f"AS{round(s0 + (s1 - s0) * k)}D{round(d0 + (d1 - d0) * k)}"
     return out
 
 

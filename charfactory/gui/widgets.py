@@ -667,6 +667,7 @@ class Navigator(QWidget):
         self.label.setMinimumWidth(58)
         self.suffix = ""
         self.count = 0
+        self.zero_based = False         # contador a partir de 0 (ticks, como o AnimElemTime)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
@@ -703,8 +704,11 @@ class Navigator(QWidget):
     def _update(self) -> None:
         v = self.slider.value()
         cur = v + 1 if self.count else 0
-        self.label.setText(f"{cur} / {self.count}")
-        self.label.setToolTip(f"{cur} de {self.count}{self.suffix}")
+        last = self.count
+        if self.zero_based:
+            cur, last = v, max(0, self.count - 1)
+        self.label.setText(f"{cur} / {last}")
+        self.label.setToolTip(f"{cur} / {last}{self.suffix}")
         self.prev.setEnabled(v > 0)
         self.next.setEnabled(v < self.slider.maximum())
 
@@ -834,8 +838,8 @@ class GroupIndex(QWidget):
 
 class Timeline(QWidget):
     """Régua de ticks com os frames da animação, o frame atual e o cursor de reprodução. Como num editor de vídeo: arrastar a borda direita de um frame muda o
-    tempo dele, Shift+arrastar estica ou comprime a animação inteira, arrastar o meio do frame
-    muda a ordem e o clique direito abre o menu do frame. Clicar (sem arrastar) só escolhe o
+    tempo dele, Shift+arrastar estica ou comprime a animação inteira, arrastar percorre os ticks,
+    Ctrl+arrastar o meio do frame muda a ordem e o clique direito abre o menu do frame. Clicar (sem arrastar) só escolhe o
     frame, mesmo na borda; com `locked` a timeline só escolhe (issue #7)."""
     tickClicked = Signal(int)
     retimed = Signal(list)      # novos tempos de todos os frames (ao soltar o mouse)
@@ -861,10 +865,10 @@ class Timeline(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(tr("Click a frame to select it (arrows: previous/next). Drag the right edge of a "
-                           "frame to change its time (Shift+drag stretches or compresses the whole animation); "
-                           "drag the middle of a frame to change the order; right-click for more, including "
-                           "locking the timing. Esc cancels."))
+        self.setToolTip(tr("Click a frame to select it (arrows: previous/next). Drag to inspect the animation "
+                           "tick by tick. Drag the right edge of a frame to change its time (Shift+drag stretches "
+                           "or compresses the whole animation); Ctrl+drag the middle of a frame to change the "
+                           "order; right-click for more, including locking the timing. Esc cancels."))
 
     def set_frames(self, durations: list[int], loopstart: int, title: str) -> None:
         self.times = list(durations)
@@ -925,10 +929,14 @@ class Timeline(QWidget):
                 return i
         return -1
 
-    def _select_at(self, x: float) -> None:
-        """Escolhe o frame sob x (o tick clicado, para o cursor ficar onde o mouse está)."""
+    def _select_at(self, x: float, clamp: bool = False) -> None:
+        """Escolhe o frame sob x (o tick clicado, para o cursor ficar onde o mouse está). Com
+        `clamp`, arrastar para fora da régua fica no primeiro ou no último tick."""
+        total = max(1, sum(self.durations))
         t = int((x - self.LEFT) / self._scale())
-        if 0 <= t < max(1, sum(self.durations)):
+        if clamp:
+            t = max(0, min(total - 1, t))
+        if 0 <= t < total:
             self.tickClicked.emit(t)
 
     @staticmethod
@@ -1079,7 +1087,7 @@ class Timeline(QWidget):
             return
         self._select_at(x)
         frame, _ = self.frame_at(x)
-        if frame >= 0 and not self.locked:
+        if frame >= 0 and not self.locked and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self._move = {"index": frame, "x": x, "active": False, "dest": frame}
 
     def mouseMoveEvent(self, e):  # noqa: N802
@@ -1114,7 +1122,7 @@ class Timeline(QWidget):
             self.update()
             return
         if e.buttons() & Qt.MouseButton.LeftButton:
-            self._select_at(x)
+            self._select_at(x, clamp=True)
             return
         self.setCursor(Qt.CursorShape.SizeHorCursor if self._edge_at(x) >= 0 else Qt.CursorShape.PointingHandCursor)
 

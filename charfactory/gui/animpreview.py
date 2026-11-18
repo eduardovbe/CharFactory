@@ -188,14 +188,18 @@ class AnimPreview(QWidget):
             return [], 0, (0, 0), tr("Action {0} has no frames").format(n)
         try:
             b = render._bounds(char, act, None, False)
-            frames = []
+            frames, starts = [], []
             for i, f in enumerate(act.frames):
-                img = render.render_frame(char, act, i, None, False, 1, background=background, bounds=b,
-                                          axis=False)
-                frames.append((pil_to_qimage(img), f.time))
+                starts.append(len(frames))
+                # frame que interpola vira uma imagem a cada 2 ticks; o tempo total não muda
+                ticks = range(0, f.time, 2) if f.time > 1 and render.interpolating(act, i) else (None,)
+                for tick in ticks:
+                    img = render.render_frame(char, act, i, None, False, 1, background=background, bounds=b,
+                                              axis=False, tick=tick)
+                    frames.append((pil_to_qimage(img), f.time if tick is None else min(2, f.time - tick)))
         except Exception as e:  # noqa: BLE001 — sprite faltando ou SFF ilegível: só avisa
             return [], 0, (0, 0), tr("Could not draw action {0}: {1}").format(n, e)
-        return frames, min(act.loopstart, len(frames) - 1), (-b[0], -b[1]), ""
+        return frames, starts[min(act.loopstart, len(starts) - 1)], (-b[0], -b[1]), ""
 
     @staticmethod
     def _render(char, n: int, background=(0, 0, 0, 0)):
@@ -220,8 +224,10 @@ class AnimPreview(QWidget):
         if self.frames:
             ticks = [t for _, t in self.frames]
             total = "∞" if any(t < 0 for t in ticks) else f"{sum(ticks)}t"
-            self.info.setText(tr("{0} fr · {1}").format(len(self.frames), total))
-            self.info.setToolTip(tr("{0} frames · ").format(len(self.frames))
+            act = char.anims.get(self.number) if char else None
+            count = len(act.frames) if act else len(self.frames)     # os frames do AIR, não as imagens
+            self.info.setText(tr("{0} fr · {1}").format(count, total))
+            self.info.setToolTip(tr("{0} frames · ").format(count)
                                  + (tr("infinite time (-1)") if total == "∞" else f"{sum(ticks)} ticks"))
         else:
             self.info.setText("")
