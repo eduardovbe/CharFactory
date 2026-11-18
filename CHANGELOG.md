@@ -7,43 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Animations
-
-- Dragging on the timeline inspects the animation tick by tick; Ctrl+drag changes the frame order.
-- `,` and `.` step one tick, and the panel shows the interpolated values.
-- Editing a frame keeps the inspected tick and pose.
-- Interpolated transparency follows Ikemen GO.
-- The Simulator and the States preview show interpolated animations.
-- Onion skin is only in its panel and starts off.
-
-### Simulator
-
-- Layers: hide sprites, P1, P2, helpers, projectiles, explods, screen effects, boxes and the ground, one by one or with presets.
-- Hide a single helper or explod of the move.
-- Background color, clean view and a choice of timeline rows.
-- Image zoom with the mouse wheel; drag to move.
-- Playback speed, repeat range and jumps to the next hit or phase.
-- Simulates again after an edit or a parameter change, on the same tick.
-- Remembers the settings and the last move of each character.
-- Sound on macOS and Linux.
-- The GIF follows the layers and the background.
-- Lists the controllers the preview does not reproduce.
+## [0.5.5] - 2026-11-18
 
 ### Added
 
-- Recovery: detect newer automatic backups, preview and recover selected files into the editor, including unapplied text and shared common states. Snapshots publish atomically and keep two generations; explicitly discarded changes stay dismissed.
-- Pending changes panel (Ctrl+Shift+D): compare live text and binary files with disk and revert an individual file while preserving changes in other files.
-- Keyboard shortcuts editor: search actions, change or clear bindings, detect conflicts and restore defaults. Bindings persist across sessions and interface languages.
-- AI task summaries and grouped undo/redo across changed parts, with manual edits kept as history barriers. External MCP clients can group operations with begin_edit_task / end_edit_task.
-- Restore open characters, the active editor, code cursors and selected animation frames on startup (configurable in Options). Missing projects are skipped; opening a file explicitly takes precedence.
-- Navigation history across editors and open characters with Alt+Left / Alt+Right.
-- Find resource usages with Shift+F12: sprites, animations, states and sounds, using unsaved editor text. Results link to the source; calculated expressions are marked as possible usages, and ZSS results open the source statedef.
+- Simulator: hide layers, helpers and explods, change the background and use a clean view.
+- Simulator: image zoom, playback speed, repeat range and jumps to the next hit.
+- Pending changes panel and recovery of automatic backups.
+- Keyboard shortcuts editor.
+- Find resource usages with Shift+F12.
+- Reopens your last session, with back and forward navigation between editors.
+- AI changes are grouped into tasks you can review and undo together.
+
+### Changed
+
+- Animations: dragging the timeline inspects each tick; Ctrl+drag changes the frame order.
+- Onion skin is only in its panel and starts off.
+- The simulator remembers your settings and simulates again after an edit.
 
 ### Fixed
 
-- Animations: inspect interpolated poses at individual ticks using the timeline or the preview tick slider, and resume playback from the selected tick (#12).
-- States: show and edit the referenced `stcommon` CNS/ZSS file, with undo, redo and saving (#13).
-- Simulator: keep a stable preview scale while following the camera, so distant helpers and long vertical trajectories no longer shrink the fighters (#13).
+- Animations: interpolated poses can be inspected tick by tick (#12).
+- States: the common states file now opens in the editor (#13).
+- Simulator: the preview keeps a stable scale (#13).
+- Simulator: long frame data no longer cuts off the view.
 
 ## [0.5.1] - 2026-11-09
 
@@ -381,7 +368,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/eduardovbe/CharFactory/compare/v0.5.1...v0.5.5
 [0.5.1]: https://github.com/eduardovbe/CharFactory/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/eduardovbe/CharFactory/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/eduardovbe/CharFactory/compare/v0.4.5...v0.4.6
