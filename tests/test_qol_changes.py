@@ -247,3 +247,11 @@ def test_recovery_supports_legacy_autosave_and_keeps_two_generations(window):
         store.write([FileChange(path, "commands", f"; snapshot {i}\n".encode(), True)])
     assert len(list((store.root / "snapshots").iterdir())) == 2
     assert store.candidates()[0].data == b"; snapshot 2\n"
+
+
+def test_none_cannot_run_out_of_references_on_python_311():
+    import sys
+    if sys.version_info >= (3, 12):
+        pytest.skip("o None é imortal a partir do Python 3.12")
+    import charfactory.gui  # noqa: F401
+    assert sys.getrefcount(None) > sys.maxsize // 4
