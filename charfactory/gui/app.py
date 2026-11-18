@@ -332,6 +332,19 @@ class MainWindow(QMainWindow):
         self.bottom.addTab(msgs_box, icon("warning"), tr("Problems"))
         self.bottom.addTab(sw, icon("find"), tr("Advanced search"))
         self.bottom.addTab(self.engine_out, icon("terminal"), tr("Engine output"))
+        self.usages_results = QListWidget()
+        self.usages_results.itemDoubleClicked.connect(self.on_search_result)
+        self.usages_summary = QLabel()
+        self.usages_summary.setWordWrap(True)
+        self.usages_summary.setObjectName("hint")
+        usages = QWidget()
+        ul = QVBoxLayout(usages)
+        ul.setContentsMargins(10, 8, 10, 8)
+        ul.setSpacing(8)
+        ul.addWidget(self.usages_summary)
+        ul.addWidget(self.usages_results)
+        self.bottom.addTab(usages, icon("find"), tr("Resource usages"))
+        self.usages_tab = self.bottom.indexOf(usages)
         # contadores das abas: só entram na aba quando há contagem (escondidos, ainda reservavam
         # ~25 px em cada aba) e vêm numa caixa com respiro para não passar do sublinhado
         self.badges = []
@@ -512,6 +525,8 @@ class MainWindow(QMainWindow):
         self.act(e, tr("Copy"), lambda: self._edit("copy"), "Ctrl+C", "copy")
         self.act(e, tr("Paste"), lambda: self._edit("paste"), "Ctrl+V", "paste")
         e.addSeparator()
+        self.usages_action = self.act(e, tr("Find resource usages…"), self.find_usages, "Shift+F12", "find")
+        e.addSeparator()
         self.act(e, tr("Find…"), self.find_text, "Ctrl+F", "find")
         self.act(e, tr("Replace…"), lambda: self.find_text(replace=True), "Ctrl+H", "replace")
         self.act(e, tr("Find and replace in all files…"), self.find_in_files, "Ctrl+Shift+F", "find_files")
@@ -617,6 +632,9 @@ class MainWindow(QMainWindow):
             a.page = page
             self.editor_actions.append(a)
             menu = QMenu(name, self)
+            if page in (self.sprites, self.anims, self.states, self.sounds):
+                menu.addAction(self.usages_action)
+                menu.addSeparator()
             if page is self.sprites:
                 # o atalho é do botão da página (Ctrl+E); aqui vai só escrito
                 self.act(menu, tr("Edit image…\tCtrl+E"), self.sprites.edit_image, None, "paint")
@@ -1238,6 +1256,9 @@ class MainWindow(QMainWindow):
         c = self.ctx.char
         if not c:
             return
+        self.usages_results.clear()
+        self.usages_summary.clear()
+        self.set_badge(self.usages_tab, 0, "badge")
         self.fill_project_tabs()
         self.fill_explorer()
         self.welcome.refresh()
@@ -1372,11 +1393,14 @@ class MainWindow(QMainWindow):
         self.set_badge(1, self.search_results.count(), "badge")
 
     def on_search_result(self, item) -> None:
-        pi, name, line = item.data(Qt.ItemDataRole.UserRole)
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        pi, name, line = data
         page = self.code_pages[pi]
         self.show_page(page)
         for i, f in enumerate(page.files):
-            if f["path"].name == name:
+            if f["path"].name == name or str(f["path"]) == name:
                 page.tabs.setCurrentIndex(i)
                 f["edit"].goto_line(line)
 
@@ -1459,6 +1483,66 @@ class MainWindow(QMainWindow):
         self.set_bottom_open(True)
 
     # ------------------------------------------------------------ navegação
+
+    def find_usages(self) -> None:
+        """Search the live buffers, including edits not applied to the model yet."""
+        if not self.ctx.char:
+            return
+        from ..tools.resource_refs import find_usages
+        page = self.current_page()
+        target = None
+        if page is self.anims and page.action():
+            target = ("anim", page.action().number, 0)
+        elif page is self.sprites and page.current():
+            s = page.current()
+            target = ("sprite", s.group, s.item)
+        elif page is self.sounds and page.sound():
+            s = page.sound()
+            target = ("sound", s.group, s.number)
+        elif page in self.code_pages and page.current_edit():
+            target = page.current_edit().reference_under_cursor()
+            if target is None and page is self.states:
+                target = ("state", page._current_statedef(), 0)
+        if target is None:
+            text, ok = QInputDialog.getText(self, tr("Find resource usages…"),
+                                          tr("Resource: anim 200, state 1000, sprite 200,0 or sound 5,0"))
+            if not ok:
+                return
+            match = re.fullmatch(r"\s*(anim|state|sprite|sound)\s+(-?\d+)(?:\s*,\s*(-?\d+))?\s*", text, re.I)
+            if not match or (match[1].lower() in ("sprite", "sound") and match[3] is None):
+                self.flash(tr("Use anim 200, state 1000, sprite 200,0 or sound 5,0."))
+                return
+            target = (match[1].lower(), int(match[2]), int(match[3] or 0))
+        self.usages_results.clear()
+        sources, lookup = [], {}
+        for pi, code in enumerate(self.code_pages):
+            if not code.files:
+                code.load()
+                code.set_issues(self.ctx.last_issues)
+            for f in code.files:
+                sources.append((f["path"], f["edit"].toPlainText(), f.get("zss", False)))
+                lookup.setdefault(f["path"], pi)
+        results, skipped = find_usages(sources, *target, funcs=self.ctx.char.zss_functions)
+        label = f"{target[0]} {target[1]}" + (f",{target[2]}" if target[0] in ("sprite", "sound") else "")
+        for ref in results:
+            prefix = tr("Possible usage (expression)") + " · " if ref.dynamic else ""
+            it = QListWidgetItem(f"{prefix}{ref.path.name}:{ref.line}:  {ref.text}")
+            it.setToolTip(str(ref.path) + "\n" + ref.text)
+            it.setData(Qt.ItemDataRole.UserRole, (lookup[ref.path], str(ref.path), ref.line))
+            self.usages_results.addItem(it)
+        if not results:
+            it = QListWidgetItem(tr("No usages found for {0}.").format(label))
+            it.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.usages_results.addItem(it)
+        summary = tr("{0} usage(s) of {1}. Expressions are possible usages; engine lookups may be implicit.").format(
+            len(results), label)
+        self.usages_summary.setText(summary)
+        self.set_badge(self.usages_tab, len(results), "badge")
+        self.show_bottom(self.usages_tab)
+        if skipped:
+            self.flash(tr("Skipped {0} ZSS file(s) with syntax errors.").format(len(skipped)))
+        else:
+            self.flash(summary)
 
     def open_definition(self, kind: str, a: int, b: int = 0) -> None:
         """Abre no editor certo o que uma referência aponta (F12/Ctrl+clique, paleta, relatórios)."""

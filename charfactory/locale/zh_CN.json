@@ -1,4 +1,12 @@
 {
+ "Resource usages": "资源引用",
+ "Find resource usages…": "查找资源引用…",
+ "Resource: anim 200, state 1000, sprite 200,0 or sound 5,0": "资源：anim 200、state 1000、sprite 200,0 或 sound 5,0",
+ "Use anim 200, state 1000, sprite 200,0 or sound 5,0.": "请输入 anim 200、state 1000、sprite 200,0 或 sound 5,0。",
+ "Possible usage (expression)": "可能的引用（表达式）",
+ "No usages found for {0}.": "未找到 {0} 的引用。",
+ "Skipped {0} ZSS file(s) with syntax errors.": "已跳过 {0} 个有语法错误的 ZSS 文件。",
+ "{0} usage(s) of {1}. Expressions are possible usages; engine lookups may be implicit.": "{1} 有 {0} 处引用。表达式表示可能的引用；引擎也可能隐式使用资源。",
  "\n\n* required": "\n\n* 必填",
  "\n\nParameters:\n": "\n\n参数：\n",
  "\nContinue?": "\n继续？",

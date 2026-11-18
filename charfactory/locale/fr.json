@@ -1,4 +1,12 @@
 {
+ "Resource usages": "Utilisations de la ressource",
+ "Find resource usages…": "Rechercher les utilisations de la ressource…",
+ "Resource: anim 200, state 1000, sprite 200,0 or sound 5,0": "Ressource : anim 200, state 1000, sprite 200,0 ou sound 5,0",
+ "Use anim 200, state 1000, sprite 200,0 or sound 5,0.": "Utilisez anim 200, state 1000, sprite 200,0 ou sound 5,0.",
+ "Possible usage (expression)": "Utilisation possible (expression)",
+ "No usages found for {0}.": "Aucune utilisation trouvée pour {0}.",
+ "Skipped {0} ZSS file(s) with syntax errors.": "{0} fichier(s) ZSS ignoré(s) en raison d’erreurs de syntaxe.",
+ "{0} usage(s) of {1}. Expressions are possible usages; engine lookups may be implicit.": "{0} utilisation(s) de {1}. Les expressions sont des utilisations possibles ; le moteur peut utiliser des ressources implicitement.",
  "\n\n* required": "\n\n* obligatoire",
  "\n\nParameters:\n": "\n\nParamètres :\n",
  "\nContinue?": "\nContinuer ?",

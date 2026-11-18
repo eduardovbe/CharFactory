@@ -29,6 +29,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The GIF follows the layers and the background.
 - Lists the controllers the preview does not reproduce.
 
+### Added
+
+- Find resource usages with Shift+F12: sprites, animations, states and sounds, using unsaved editor text. Results link to the source; calculated expressions are marked as possible usages, and ZSS results open the source statedef.
+
 ### Fixed
 
 - Animations: inspect interpolated poses at individual ticks using the timeline or the preview tick slider, and resume playback from the selected tick (#12).
