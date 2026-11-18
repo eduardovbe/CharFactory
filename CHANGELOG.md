@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- States: show and edit the referenced `stcommon` CNS/ZSS file, with undo, redo and saving (#13).
+
 ## [0.5.1] - 2026-11-09
 
 ### Added

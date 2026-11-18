@@ -457,12 +457,22 @@ class CodePage(QWidget):
                 return []
         if self.kind == "states":
             # ZSS: a aba mostra o .zss (st.doc é o CNS rebaixado, só para simular e validar)
-            return [{"kind": "states", "index": i, "path": st.path, "zss": isinstance(st, zssread.ZssStates),
-                     "text": (lambda st=st: st.text if isinstance(st, zssread.ZssStates) else st.doc.to_text())}
-                    for i, st in enumerate(c.states)]
+            sources = [{"kind": "states", "index": i, "path": st.path, "zss": isinstance(st, zssread.ZssStates),
+                        "text": (lambda i=i: self._state_text(c.states[i]))}
+                       for i, st in enumerate(c.states)]
+            common = c.common_states
+            if common and all(st.path != common.path for st in c.states):
+                sources.append({"kind": "common_states", "path": common.path,
+                                "zss": isinstance(common, zssread.ZssStates),
+                                "text": lambda: self._state_text(c.common_states)})
+            return sources
         if self.kind == "air":
             return [{"kind": "air", "path": c.path_of("anim"), "text": lambda: c.anims.to_text()}]
         return []
+
+    @staticmethod
+    def _state_text(st) -> str:
+        return st.text if isinstance(st, zssread.ZssStates) else st.doc.to_text()
 
     def on_character(self) -> None:
         """Outro personagem: a página à vista recarrega já; as escondidas só esvaziam e carregam
@@ -537,7 +547,8 @@ class CodePage(QWidget):
     def on_model(self, part: str) -> None:
         if self._applying or not self.files:
             return
-        mapping = {"def": "def", "commands": "cmd", "states": "states", "anims": "air", "anims_inline": "air"}
+        mapping = {"def": "def", "commands": "cmd", "states": "states", "common_states": "states",
+                   "anims": "air", "anims_inline": "air"}
         if mapping.get(part) == self.kind or (part == "states" and self.kind == "cmd"):
             QTimer.singleShot(0, self.reload_unmodified)
 
@@ -1072,10 +1083,11 @@ class CodePage(QWidget):
             elif f["kind"] == "cmd":
                 c.__dict__["commands"] = cmd.Commands(parse(c.commands.doc), f["path"])
                 self.ctx.changed("commands")
-            elif f["kind"] == "states":
-                if f["index"] >= len(c.states):
+            elif f["kind"] in ("states", "common_states"):
+                common = f["kind"] == "common_states"
+                old = c.common_states if common else next((st for st in c.states if st.path == f["path"]), None)
+                if old is None or old.path != f["path"]:
                     raise ProjectError(tr("the .def no longer lists {0} in [Files]").format(f['path'].name))
-                old = c.states[f["index"]]
                 if isinstance(old, zssread.ZssStates):
                     # continua ZSS: antes virava cns.States e o Ctrl+S gravava CNS dentro do .zss
                     try:
@@ -1083,9 +1095,13 @@ class CodePage(QWidget):
                     except zssread.ZssError as e:
                         raise ProjectError(tr("ZSS syntax error: {0}").format(e)) from e
                 else:
-                    c.states[f["index"]] = cns.States(parse(old.doc), f["path"])
+                    updated = cns.States(parse(old.doc), f["path"])
+                    if common:
+                        c.__dict__["common_states"] = updated
+                    else:
+                        c.states[c.states.index(old)] = updated
                 self.ctx.reset_cache("constants")
-                self.ctx.changed("states")
+                self.ctx.changed("common_states" if common else "states")
             elif f["kind"] == "air":
                 c.__dict__["anims"] = air.AIR(parse(c.anims.doc))
                 self.ctx.changed("anims")

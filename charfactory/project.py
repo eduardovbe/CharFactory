@@ -275,6 +275,8 @@ class Character:
         if "states" in self.dirty:
             for st in self.states:
                 write(st.path, st.save)
+        if "common_states" in self.dirty and self.common_states:
+            write(self.common_states.path, self.common_states.save)
         self.dirty.clear()
         return written
 
@@ -286,6 +288,9 @@ class Character:
             p = self.path_of(key)
             if p and p.exists() and p not in out:
                 out.append(p)
+        common = self.path_of("stcommon")
+        if common and common.exists() and common.is_relative_to(self.dir) and common not in out:
+            out.append(common)
         out += [p for p in self.palette_files().values() if p.exists() and p not in out]
         return out
 
@@ -328,6 +333,8 @@ class Character:
         if "states" in parts:
             for st in self.states:
                 write(st.path, st.save)
+        if "common_states" in parts and self.common_states:
+            write(self.common_states.path, self.common_states.save)
         return written
 
 

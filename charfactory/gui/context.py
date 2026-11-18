@@ -47,9 +47,10 @@ class Settings(dict):
 
 # parte do modelo -> atributo do Character que a guarda (carregado sob demanda)
 PARTS = {"sprites": "sprites", "anims": "anims", "sounds": "sounds",
-         "states": "states", "commands": "commands", "def": "definition"}
+         "states": "states", "common_states": "common_states", "commands": "commands", "def": "definition"}
 # partes carregadas a partir do [Files] do .def: desfazer um .def com outro [Files] recarrega
-FILE_PARTS = {"sprites": "sprites", "anims": "anims", "sounds": "sounds", "commands": "commands", "states": "states"}
+FILE_PARTS = {"sprites": "sprites", "anims": "anims", "sounds": "sounds", "commands": "commands",
+              "states": "states", "common_states": "common_states"}
 
 
 def _snapshot(part: str, obj):

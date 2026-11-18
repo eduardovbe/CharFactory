@@ -2191,6 +2191,8 @@ class MainWindow(QMainWindow):
             doc, part = c.commands.doc, "commands"
         elif kind == "states":
             doc, part = c.states[f["index"]].doc, "states"
+        elif kind == "common_states":
+            doc, part = c.common_states.doc, "common_states"
         else:
             doc, part = c.anims.doc, "anims"
         doc.encoding = "utf-8"
