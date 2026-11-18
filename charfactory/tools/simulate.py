@@ -35,6 +35,7 @@ from PIL import Image, ImageDraw
 
 from . import simexpr
 from .charkit import _Canvas, _frame_img, _trans, frame_at, sprite_rgba
+from .render import frame_scale_angle, interpolated_frame
 from ..i18n import tr
 
 # --------------------------------------------------------------------- leitura do CNS
@@ -468,7 +469,8 @@ class Entity:
         fr = self.frames()
         if not fr:
             return None
-        return fr[max(0, self.elem_at(self.anim_t) - 1)]
+        i = max(0, self.elem_at(self.anim_t) - 1)
+        return interpolated_frame(self.sim.char.anims.get(self.anim), i, self._age(self.anim_t) - self.starts()[0][i])
 
 
 @dataclass
@@ -721,6 +723,9 @@ CTRL_IGNORED = {"null", "playsnd", "stopsnd", "nothitby", "hitby",
                 "hitfallset", "fallenvshake", "targetpoweradd",
                 "targetdrop", "reversaldef", "attackdist", "offset",
                 "zoom", "camera"}
+# ignorados que não mudam o golpe na prévia: os outros são listados como "não simulados aqui"
+CTRL_SILENT = {"null", "playsnd", "stopsnd", "sndpan", "displaytoclipboard", "appendtoclipboard",
+               "clearclipboard", "victoryquote", "forcefeedback"}
 # controladores registrados como evento "ctrl" (som, tremor, cor, rastro, sumir, prender)
 REVERSAL_T = 8           # tick da janela do ReversalDef em que o boneco "ataca" o contra
 HELPER_MAX = 56          # helpers vivos por jogador (MUGEN 1.1)
@@ -753,6 +758,7 @@ class Sim:
         self.origin_x = 0.0
         self.notes: list[str] = []
         self.unsupported: dict[str, int] = {}
+        self.ignored: dict[str, int] = {}         # controladores que dispararam sem efeito na prévia
         self.events: list[dict] = []
         self.helpers: list[Entity] = []
         self.projs: list[Entity] = []
@@ -1360,6 +1366,8 @@ class Sim:
             self.note(tr("ZSS loop cut at {0} turns").format(p.get("turns", "?")))
             return
         if typ in CTRL_IGNORED or typ.startswith("snd"):
+            if typ not in CTRL_SILENT and not typ.startswith("snd"):
+                self.ignored[typ] = self.ignored.get(typ, 0) + 1
             return
         self.note(tr("controller {0} not simulated").format(typ))
 
@@ -2943,18 +2951,42 @@ def _screen_layer(sim: Sim, rec: dict, size, front: bool):
     return cv.im.resize(size, Image.BILINEAR)
 
 
-def render_tick(sim: Sim, rec: dict, window, zoom=2, boxes=True, show_p2=True):
+def _ent_hidden(e: dict, hide) -> bool:
+    """A entidade está numa camada escondida (P1, helpers, projéteis) ou foi escondida pelo nome."""
+    layer = "projectiles" if e.get("proj") else "helpers" if e.get("helper") else "p1"
+    return layer in hide or ("helper", e["name"]) in hide
+
+
+def layer_items(sim: Sim) -> dict:
+    """Helpers e explods que apareceram na simulação, para esconder um a um."""
+    helpers, explods = set(), set()
+    for rec in sim.track:
+        helpers |= {e["name"] for e in rec["ents"] if e.get("helper") and not e.get("proj")}
+        explods |= {x["anim"] for x in rec["explods"]}
+    return {"helpers": sorted(helpers), "explods": sorted(explods)}
+
+
+def render_tick(sim: Sim, rec: dict, window, zoom=2, boxes=True, show_p2=True, hide=frozenset(),
+                background=None, hurtboxes=False):
+    """Desenha um tick. `hide` traz as camadas escondidas (LAYERS) e itens soltos, como
+    ("helper", "helper 1") ou ("explod", 6000); `background` troca a cor do fundo e `hurtboxes`
+    desenha também as Clsn2 do P1 e dos helpers."""
     cv = _Canvas(window, zoom)
+    if background is not None:
+        cv.im = Image.new("RGBA", cv.im.size, (*background, 255))
     if rec.get("nobg"):                       # cena: o char apagou o cenário
         cv.im = Image.new("RGBA", cv.im.size, (0, 0, 0, 255))
-    back = _screen_layer(sim, rec, cv.im.size, front=False)
+    sprites = "sprites" not in hide
+    screen = sprites and "screen" not in hide
+    back = _screen_layer(sim, rec, cv.im.size, front=False) if screen else None
     if back is not None:
         cv.im.alpha_composite(back)
     d0 = ImageDraw.Draw(cv.im)
     gy = cv.P(0, 0)[1]
-    d0.line([(0, gy), (cv.w, gy)], fill=(120, 150, 120, 255))
+    if "ground" not in hide:
+        d0.line([(0, gy), (cv.w, gy)], fill=(120, 150, 120, 255))
     items = []
-    if show_p2:
+    if show_p2 and sprites and "p2" not in hide:
         p2 = rec["p2"]
         f = p2.get("frame") or next((f for k in p2_keys(p2["state"], p2.get("pose", "stand"))
                                      if (f := frame_at(sim.char, P2_ANIM.get(k, 0), 0)) is not None), None)             or frame_at(sim.char, 0, 0)
@@ -2963,16 +2995,19 @@ def render_tick(sim: Sim, rec: dict, window, zoom=2, boxes=True, show_p2=True):
             items.append((-50, "p2", (_gray(im), ax, ay, p2["pos"][0] + (2 if p2["shake"] % 2 else 0),
                                       p2["pos"][1], 1, 1, p2["facing"], 0.0, "normal", 1.0)))
     for e in rec["ents"]:
-        if e["inv"] or e["frame"] is None:
+        if e["inv"] or e["frame"] is None or not sprites or _ent_hidden(e, hide):
             continue
         im, ax, ay = _frame_img(sim.char, e["frame"])
         if im is None:
             continue
         im = _palfx(im, e["pal"])
         mode, al, dl = _blend(e["frame"], e["trans"], e.get("alpha"))
-        items.append((e["spr"], e["name"], (im, ax, ay, e["pos"][0], e["pos"][1], e["scale"][0],
-                                            e["scale"][1], e["facing"], e.get("angle", 0.0), mode, al, dl)))
+        xs, ys, an = frame_scale_angle(e["frame"])       # escala e ângulo do próprio frame (AIR 1.1)
+        items.append((e["spr"], e["name"], (im, ax, ay, e["pos"][0], e["pos"][1], e["scale"][0] * xs,
+                                            e["scale"][1] * ys, e["facing"], e.get("angle", 0.0) + an, mode, al, dl)))
     for x in rec["explods"]:
+        if not sprites or "explods" in hide or ("explod", x["anim"]) in hide:
+            continue
         im, ax, ay = _frame_img(sim.char, x["frame"])
         if im is None:
             continue
@@ -2980,26 +3015,33 @@ def render_tick(sim: Sim, rec: dict, window, zoom=2, boxes=True, show_p2=True):
             im = im.transpose(Image.FLIP_TOP_BOTTOM)
             ay = im.height - ay
         mode, al, dl = _blend(x["frame"], x["trans"], x.get("alpha"))
-        items.append((x["spr"], "fx", (im, ax, ay, x["pos"][0], x["pos"][1], x["scale"][0],
-                                       x["scale"][1], x["facing"], x["angle"], mode, al, dl)))
+        xs, ys, an = frame_scale_angle(x["frame"])
+        items.append((x["spr"], "fx", (im, ax, ay, x["pos"][0], x["pos"][1], x["scale"][0] * xs,
+                                       x["scale"][1] * ys, x["facing"], x["angle"] + an, mode, al, dl)))
     items.sort(key=lambda t: t[0])
     for _, who, (im, ax, ay, x, y, sx, sy, fc, ang, mode, al, *dl) in items:
         cv.blit(im, ax, ay, x, y, sx, sy, fc, ang, mode, al, dl[0] if dl else 1.0)
     d = ImageDraw.Draw(cv.im)
     if boxes:
         for e in rec["ents"]:
-            for bx in e["clsn1"]:
+            if _ent_hidden(e, hide):
+                continue
+            if hurtboxes and "clsn2" not in hide:
+                for bx in e["clsn2"]:
+                    (x0, y0), (x1, y1) = cv.P(bx[0], bx[1]), cv.P(bx[2], bx[3])
+                    d.rectangle([x0, y0, x1, y1], outline=(80, 140, 255, 255))
+            for bx in e["clsn1"] if "clsn1" not in hide else ():
                 (x0, y0), (x1, y1) = cv.P(bx[0], bx[1]), cv.P(bx[2], bx[3])
                 d.rectangle([x0, y0, x1, y1], outline=(255, 60, 60, 255))
-        for bx in rec["p2box"]:
+        for bx in rec["p2box"] if "clsn2" not in hide and "p2" not in hide else ():
             (x0, y0), (x1, y1) = cv.P(bx[0], bx[1]), cv.P(bx[2], bx[3])
             d.rectangle([x0, y0, x1, y1], outline=(80, 140, 255, 255))
-    front = _screen_layer(sim, rec, cv.im.size, front=True)
+    front = _screen_layer(sim, rec, cv.im.size, front=True) if screen else None
     if front is not None:
         cv.im.alpha_composite(front)
         d = ImageDraw.Draw(cv.im)
     p1 = rec["ents"][0] if rec["ents"] else None
-    if p1:
+    if p1 and "ground" not in hide:
         x, y = cv.P(p1["pos"][0], 0)
         d.line([(x, y - 4), (x, y + 4)], fill=(255, 255, 0, 255))
     return cv.im
@@ -3124,13 +3166,14 @@ def _window(sim: Sim):
             int(min(min(ys) - 1.9 * h, -2.2 * h)), int(max(15, max(ys) + 15)))
 
 
-def animation(sim: Sim, path, step: int = 1, zoom: int = 2, boxes: bool = False) -> str:
+def animation(sim: Sim, path, step: int = 1, zoom: int = 2, boxes: bool = False, hide=frozenset(),
+              background=None, hurtboxes: bool = False) -> str:
     """GIF do golpe simulado em tempo real (60 ticks = 1 s), câmera fixa, com o tick, o estado
-    e o quadro escritos em cima."""
+    e o quadro escritos em cima. `hide`, `background` e `hurtboxes` são os de render_tick."""
     window = _window(sim)
     frames = []
     for rec in sim.track[::step]:
-        im = render_tick(sim, rec, window, zoom, boxes)
+        im = render_tick(sim, rec, window, zoom, boxes, hide=hide, background=background, hurtboxes=hurtboxes)
         d = ImageDraw.Draw(im)
         p1 = next((e for e in rec["ents"] if e["name"] == "P1"), None)
         lab = f"t{rec['t']}  {rec['t'] / 60:.2f}s"
@@ -3231,11 +3274,11 @@ def audit(sim: Sim) -> list[dict]:
     seen = set()
     measured = set()
 
-    def add(kind, msg, key):
+    def add(kind, msg, key, t=None):
         if key in seen:
             return
         seen.add(key)
-        out.append({"kind": kind, "message": msg})
+        out.append({"kind": kind, "message": msg, **({"t": t} if t is not None else {})})
 
     for rec in sim.track:
         # helpers de efeito (aura, garras) entram como efeito: frame/pos/facing/escala do helper
@@ -3260,17 +3303,17 @@ def audit(sim: Sim) -> list[dict]:
             # medido: aura certa 0,7%, aura afundada 11%, rastro do dash no chão 54%, raios 1-4%
             depth = float(pts[1].max()) if pts is not None else 0.0
             if frac > 0.05 and depth > 5 and not x["on_hit"] and not kit:  # faísca de acerto pode passar do chão
-                add("below-ground", tr("{0}: {1:.0%} of the effect below the ground (up to {2:.0f} px)").format(lab, frac, float(pts[1].max())), ("chao", lab))
+                add("below-ground", tr("{0}: {1:.0%} of the effect below the ground (up to {2:.0f} px)").format(lab, frac, float(pts[1].max())), ("chao", lab), rec["t"])
             if (b[3] - b[1] > 2.6 * h or b[2] - b[0] > 4.5 * h) and not kit:
                 if x["anim"] < 30000 or x["anim"] >= 35000:
-                    add("huge-effect", tr("{0}: {1:.0f}x{2:.0f} px (the character is {3:.0f})").format(lab, b[2]-b[0], b[3]-b[1], h), ("big", lab))
+                    add("huge-effect", tr("{0}: {1:.0f}x{2:.0f} px (the character is {3:.0f})").format(lab, b[2]-b[0], b[3]-b[1], h), ("big", lab), rec["t"])
             w_, h_ = b[2] - b[0], b[3] - b[1]
             round_ = max(w_, h_) < 1.8 * max(1.0, min(w_, h_))
             # na cena (cenário apagado pelo próprio char) o fundo é preto: o halo não acinzenta nada
             if x["trans"] != "sub" and not x["on_hit"] and not kit and round_ and not rec.get("nobg"):
                 area = _dim_area(sim, x)
                 if area > 2.5 * h * h:
-                    add("dark-halo", tr("{0}: dimmed area of {1:.0f} px² ({2:.1f}x the character's height²) — added to the stage it becomes a gray disc").format(lab, area, area / (h * h)), ("halo", lab))
+                    add("dark-halo", tr("{0}: dimmed area of {1:.0f} px² ({2:.1f}x the character's height²) — added to the stage it becomes a gray disc").format(lab, area, area / (h * h)), ("halo", lab), rec["t"])
     # golpes que não acertam
     acts = [e for e in sim.events if e["kind"] == "acerto"]
     if not acts and not any(e["kind"] == "defesa" for e in sim.events) and any(r for r in sim.track if any(e.get("clsn1") for e in r["ents"])):
@@ -3290,7 +3333,7 @@ def audit(sim: Sim) -> list[dict]:
         side = at["p2"]["pos"][0] - at["ents"][0]["pos"][0]
         toward = abs(vx) >= 2 and vx * side < 0
         if toward or (abs(p2b - p2a) > 20 and abs(p2b - p1x) < abs(p2a - p1x) - 20):
-            add("reversed-push", tr("the last hit pushes the opponent toward the attacker (check the sign of ground.velocity x)"), ("push",))
+            add("reversed-push", tr("the last hit pushes the opponent toward the attacker (check the sign of ground.velocity x)"), ("push",), hit["t"])
     return out
 
 

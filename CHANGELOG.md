@@ -16,6 +16,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The Simulator and the States preview show interpolated animations.
 - Onion skin is only in its panel and starts off.
 
+### Simulator
+
+- Layers: hide sprites, P1, P2, helpers, projectiles, explods, screen effects, boxes and the ground, one by one or with presets.
+- Hide a single helper or explod of the move.
+- Background color, clean view and a choice of timeline rows.
+- Image zoom with the mouse wheel; drag to move.
+- Playback speed, repeat range and jumps to the next hit or phase.
+- Simulates again after an edit or a parameter change, on the same tick.
+- Remembers the settings and the last move of each character.
+- Sound on macOS and Linux.
+- The GIF follows the layers and the background.
+- Lists the controllers the preview does not reproduce.
+
 ### Fixed
 
 - Animations: inspect interpolated poses at individual ticks using the timeline or the preview tick slider, and resume playback from the selected tick (#12).

@@ -21,8 +21,10 @@ NAME = "Char Factory"
 EXCLUDE = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
            "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick", "PySide6.QtQml",
            "PySide6.QtQuick3D", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf",
-           "PySide6.QtMultimedia", "PySide6.QtBluetooth", "PySide6.QtSensors", "PySide6.QtSerialPort",
+           "PySide6.QtBluetooth", "PySide6.QtSensors", "PySide6.QtSerialPort",
            "tkinter", "matplotlib", "pytest"]
+if sys.platform == "win32":     # no Windows o som do simulador sai pelo winsound; nos outros, pelo QtMultimedia
+    EXCLUDE.append("PySide6.QtMultimedia")
 
 
 def main() -> int:

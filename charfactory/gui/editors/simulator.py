@@ -9,20 +9,21 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tempfile
 import time
 import traceback
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSlider,
+from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QSlider,
                                QSizePolicy, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..canvas import pil_to_qimage
 from ..context import AppContext
 from ..icons import icon
-from ..widgets import DocStrip, Section, SidePanel, compact, form_row, tool_bar
+from ..widgets import MORE, DocStrip, Section, SidePanel, compact, form_row, tool_bar, tool_button
 from ...i18n import tr
 
 
@@ -88,6 +89,31 @@ P2_MODES = [(tr("Standing still"), "stand", False), (tr("Standing guard"), "stan
             (tr("Crouching"), "crouch", False), (tr("Crouching guard"), "crouch", True),
             (tr("In the air"), "air", False)]
 
+# camadas da prévia: chave (a de simulate.render_tick), nome e dica
+LAYERS = [("sprites", tr("Sprites"), tr("Turn off to see only the boxes")),
+          ("p1", "P1", tr("The character")),
+          ("p2", "P2", tr("The opponent and its boxes")),
+          ("helpers", tr("Helpers"), tr("Helpers and their boxes")),
+          ("projectiles", tr("Projectiles"), tr("Projectiles and their boxes")),
+          ("explods", "Explods", tr("Effects on the stage")),
+          ("screen", tr("Screen effects"), tr("Cut-ins and other effects attached to the screen")),
+          ("clsn1", tr("Attack boxes"), tr("Clsn1, in red")),
+          ("clsn2", tr("Hurt boxes"), tr("Clsn2, in blue")),
+          ("ground", tr("Ground"), tr("Ground line and the mark under P1"))]
+
+_NO_GUIDES = {"clsn1", "clsn2", "ground"}
+VIEW_PRESETS = [("all", tr("Everything"), set()),
+                ("clean", tr("Characters only"), {"helpers", "projectiles", "explods", "screen"} | _NO_GUIDES),
+                ("p1", tr("P1 only"), {"p2", "helpers", "projectiles", "explods", "screen"} | _NO_GUIDES),
+                ("effects", tr("Effects only"), {"p1", "p2"} | _NO_GUIDES),
+                ("boxes", tr("Boxes only"), {"sprites"})]
+
+BACKGROUNDS = [("default", tr("Default"), None), ("black", tr("Black"), (0, 0, 0)),
+               ("gray", tr("Gray"), (96, 96, 96)), ("white", tr("White"), (245, 245, 245)),
+               ("green", tr("Green screen"), (0, 177, 64))]
+
+SPEEDS = [("1/8x", 0.125), ("1/4x", 0.25), ("1/2x", 0.5), ("1x", 1.0), ("2x", 2.0)]
+
 
 # cor de cada tipo de marcador da linha do tempo
 MARK_COLORS = {"acerto": "#f85149", "defesa": "#388bfd", "som": "#d29922", "explod": "#a371f7",
@@ -114,7 +140,9 @@ class MoveTimeline(QWidget):
     def __init__(self):
         super().__init__()
         from ...tools.movetimeline import ROWS
+        self.all_rows = ROWS
         self.rows_def = ROWS
+        self.loop: tuple[int, int] | None = None     # trecho repetido pelo play
         self.data: dict | None = None
         self.current = 0
         self.scale = 8.0              # pixels por tick
@@ -125,6 +153,16 @@ class MoveTimeline(QWidget):
         self.setMouseTracking(True)
         self.setFixedHeight(self.RULER_H + self.ROW_H * len(ROWS) + 4)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+    def set_hidden_rows(self, hidden) -> None:
+        """Esconde faixas da linha do tempo (a altura acompanha)."""
+        self.rows_def = [r for r in self.all_rows if r[0] not in hidden]
+        self.setFixedHeight(self.RULER_H + self.ROW_H * len(self.rows_def) + 4)
+        self.update()
+
+    def set_loop(self, loop: tuple[int, int] | None) -> None:
+        self.loop = loop
+        self.update()
 
     @property
     def phases(self) -> list[str]:
@@ -275,11 +313,16 @@ class MoveTimeline(QWidget):
             p.drawLine(int(x), self.RULER_H - 5, int(x), self.RULER_H - 1)
             p.drawText(int(x) + 3, 0, 40, self.RULER_H - 2, Qt.AlignmentFlag.AlignVCenter, str(t))
         rows = {k: r for r, (k, _) in enumerate(self.rows_def)}
+        if self.loop:                 # trecho que o play repete
+            shade = QColor(pal.highlight().color())
+            shade.setAlpha(45)
+            x0, x1 = self._x(self.loop[0]), self._x(self.loop[1] + 1)
+            p.fillRect(int(x0), 0, max(2, int(x1 - x0)), self.height(), shade)
         # frame data
-        y = self.RULER_H + rows["fases"] * self.ROW_H + 3
+        y = self.RULER_H + rows.get("fases", 0) * self.ROW_H + 3
         gap = 1 if self.scale >= 4 else 0
         cols = {k: QColor(c) for k, (_, c) in PHASES.items() if c}
-        for i, ph in enumerate(self.data["phases"]):
+        for i, ph in enumerate(self.data["phases"] if "fases" in rows else ()):
             c = cols.get(ph)
             if c is not None:
                 x0, x1 = self._x(i), self._x(i + 1)
@@ -290,6 +333,8 @@ class MoveTimeline(QWidget):
         frame_cols[0].setAlpha(110)
         frame_cols[1].setAlpha(60)
         for key, items in self.data["rows"].items():
+            if key not in rows:
+                continue
             y = self.RULER_H + rows[key] * self.ROW_H + 2
             h = self.ROW_H - 4
             for k, it in enumerate(items):
@@ -328,16 +373,34 @@ class MoveTimeline(QWidget):
 
 class SoundPlayer:
     """Toca a trilha do golpe (os sons mixados em um WAV) a partir de um tick. O winsound toca
-    um arquivo por vez; dois arquivos alternados evitam regravar o que ainda está tocando."""
+    um arquivo por vez; dois arquivos alternados evitam regravar o que ainda está tocando. Fora
+    do Windows quem toca é o QtMultimedia."""
 
     def __init__(self):
         self._n = 0
         self.playing = False
+        self._player = None
+
+    @staticmethod
+    def available() -> bool:
+        if sys.platform == "win32":
+            return True
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def _qt_player(self):
+        if self._player is None:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+            self._player = QMediaPlayer()
+            self._player.setAudioOutput(QAudioOutput(self._player))
+        return self._player
 
     def play(self, sim, start_tick: int) -> None:
         self.stop()
         try:
-            import winsound
             from ...tools import simulate
             wav = simulate.sound_track(sim, start_tick)
             if not wav:
@@ -346,7 +409,13 @@ class SoundPlayer:
             path = os.path.join(tempfile.gettempdir(), f"charfactory_sim_{os.getpid()}_{self._n}.wav")
             with open(path, "wb") as fh:
                 fh.write(wav)
-            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            if sys.platform == "win32":
+                import winsound
+                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            else:
+                player = self._qt_player()
+                player.setSource(QUrl.fromLocalFile(path))
+                player.play()
             self.playing = True
         except (ImportError, OSError, RuntimeError):
             pass
@@ -356,19 +425,32 @@ class SoundPlayer:
             return
         self.playing = False
         try:
-            import winsound
-            winsound.PlaySound(None, 0)
-        except ImportError:
+            if sys.platform == "win32":
+                import winsound
+                winsound.PlaySound(None, 0)
+            elif self._player is not None:
+                self._player.stop()
+        except (ImportError, RuntimeError):
             pass
 
 
 class TickView(QLabel):
+    """Imagem do tick. 100% cabe na área; a roda aproxima no ponto do mouse, arrastar move a
+    imagem aproximada e o duplo clique volta a caber."""
+    viewChanged = Signal(float, QPointF)
+
+    MAX_ZOOM = 16.0
+
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._pix: QPixmap | None = None
+        self.view_zoom = 1.0
+        self.view_pan = QPointF(0, 0)
+        self._grab: QPointF | None = None
 
     def set_image(self, img) -> None:
         self._pix = QPixmap.fromImage(pil_to_qimage(img)) if img is not None else None
@@ -383,14 +465,78 @@ class TickView(QLabel):
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         self._fit()
+        self.view_pan = self._clamped(self.view_pan)
 
     placeholder = (tr("No simulation yet"), tr("Pick a state in the panel and click Simulate (F9 opens this page)."))
 
+    # ---- zoom e posição
+    def _scale(self) -> float:
+        if self._pix is None or self._pix.isNull():
+            return 1.0
+        return min(self.width() / self._pix.width(), self.height() / self._pix.height()) * self.view_zoom
+
+    def _clamped(self, pan: QPointF) -> QPointF:
+        """A imagem aproximada não sai da área: arrastar não deixa borda vazia."""
+        if self._pix is None or self._pix.isNull():
+            return pan
+        s = self._scale()
+        mx = max(0.0, (self._pix.width() * s - self.width()) / 2)
+        my = max(0.0, (self._pix.height() * s - self.height()) / 2)
+        return QPointF(max(-mx, min(mx, pan.x())), max(-my, min(my, pan.y())))
+
+    def set_view(self, zoom: float, pan: QPointF, notify: bool = False) -> None:
+        self.view_zoom = max(1.0, min(self.MAX_ZOOM, zoom))
+        self.view_pan = self._clamped(pan)
+        self.setCursor(Qt.CursorShape.OpenHandCursor if self.view_zoom > 1 else Qt.CursorShape.ArrowCursor)
+        self.update()
+        if notify:
+            self.viewChanged.emit(self.view_zoom, self.view_pan)
+
+    def zoom_by(self, factor: float, at: QPointF | None = None) -> None:
+        """Aproxima mantendo parado o ponto `at` (o centro, sem ele)."""
+        c = QPointF(self.width() / 2, self.height() / 2)
+        at = at if at is not None else c
+        new = max(1.0, min(self.MAX_ZOOM, self.view_zoom * factor))
+        k = new / self.view_zoom
+        self.set_view(new, (at - c) - (at - c - self.view_pan) * k, notify=True)
+
+    def reset_view(self) -> None:
+        self.set_view(1.0, QPointF(0, 0), notify=True)
+
+    def wheelEvent(self, e):  # noqa: N802
+        steps = e.angleDelta().y() / 120
+        if steps and self._pix is not None:
+            self.zoom_by(1.25 ** steps, e.position())
+        e.accept()
+
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton and self.view_zoom > 1:
+            self._grab = e.position() - self.view_pan
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if self._grab is not None:
+            self.set_view(self.view_zoom, e.position() - self._grab, notify=True)
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        self._grab = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor if self.view_zoom > 1 else Qt.CursorShape.ArrowCursor)
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        self.reset_view()
+
     def paintEvent(self, e):  # noqa: N802 — sem imagem: um aviso no meio em vez do vazio
-        if self._pix is not None:
-            return super().paintEvent(e)
-        from PySide6.QtGui import QPainter
         p = QPainter(self)
+        if self._pix is not None:
+            s = self._scale()
+            w, h = self._pix.width() * s, self._pix.height() * s
+            target = QRectF((self.width() - w) / 2 + self.view_pan.x(),
+                            (self.height() - h) / 2 + self.view_pan.y(), w, h)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, s < 1)   # ampliado: pixels nítidos
+            p.drawPixmap(target, self._pix, QRectF(self._pix.rect()))
+            p.end()
+            return
         r = self.rect()
         f = p.font()
         f.setPointSizeF(f.pointSizeF() + 2)
@@ -414,6 +560,7 @@ class TickView(QLabel):
             return
         self.setPixmap(self._pix.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
                                         Qt.TransformationMode.FastTransformation))
+        self.update()
 
 
 class SimulatorPage(QWidget):
@@ -432,10 +579,23 @@ class SimulatorPage(QWidget):
         self._want: tuple | None = None
         self._audit_item: QListWidgetItem | None = None
         self._failed: dict[tuple, str] = {}     # ticks que não desenharam (não tenta de novo)
+        self._stale = False                     # o personagem mudou com a página fechada
+        self._rerun = False                     # mudou enquanto uma simulação rodava
+        self._marks: list[int] = []             # ticks de acerto, defesa e troca de fase
+        self._loop: tuple[int, int] | None = None
+        self._hidden_items: set[tuple] = set()  # helpers e explods escondidos um a um
+        self._resume_at = 0
+        prefs = self._prefs()
+
+        self._auto = QTimer(self, singleShot=True, interval=350, timeout=self._auto_run)
+        self._save_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_prefs)
 
         self.state = QComboBox()
         self.state.setEditable(True)
+        self.state.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.state.setToolTip(tr("State to simulate (the .cmd moves appear in the list)"))
+        self.state.activated.connect(lambda _: self.run())
+        self.state.lineEdit().returnPressed.connect(self.run)
         self.reload_states = QToolButton()
         self.reload_states.setIcon(icon("reload"))
         self.reload_states.setToolTip(tr("Reload the state list"))
@@ -443,56 +603,84 @@ class SimulatorPage(QWidget):
         self.reload_states.clicked.connect(lambda: self.fill_states())
         self.dist = QDoubleSpinBox()
         self.dist.setRange(0, 400)
-        self.dist.setValue(50)
+        self.dist.setValue(float(prefs.get("dist", 50)))
         self.dist.setSuffix(" px")
+        self.dist.valueChanged.connect(lambda _: self._param_changed())
         self.max_ticks = QSpinBox()
         self.max_ticks.setRange(30, 3000)
-        self.max_ticks.setValue(900)
+        self.max_ticks.setValue(int(prefs.get("max_ticks", 900)))
+        self.max_ticks.valueChanged.connect(lambda _: self._param_changed())
         self.zoom = QSpinBox()
         self.zoom.setRange(1, 4)
         self.zoom.setSuffix("x")
-        self.zoom.setValue(2)
-        self.zoom.valueChanged.connect(lambda _: self.show_tick())
-        self.boxes = QCheckBox(tr("Clsn boxes"))
-        self.boxes.setChecked(True)
-        self.p2 = QCheckBox(tr("Show P2"))
-        self.p2.setChecked(True)
-        for cb in (self.boxes, self.p2):
-            cb.toggled.connect(lambda _: self.show_tick())
+        self.zoom.setValue(int(prefs.get("quality", 2)))
+        self.zoom.setToolTip(tr("Resolution of the drawing and of the GIF. To get closer, use the mouse wheel on the image"))
+        self.zoom.valueChanged.connect(lambda _: (self.show_tick(), self._save_soon()))
+        self.background = QComboBox()
+        for _key, label, color in BACKGROUNDS:
+            self.background.addItem(label, color)
+        self.background.setCurrentIndex(next((i for i, b in enumerate(BACKGROUNDS) if b[0] == prefs.get("background")), 0))
+        self.background.currentIndexChanged.connect(lambda _: (self.show_tick(), self._save_soon()))
         self.chain = QLineEdit()
         self.chain.setPlaceholderText(tr("e.g. 200 210 1000"))
         self.chain.setToolTip(tr("Move chain (combo): each state comes in as soon as it can — cancels if it touched and there is a cancel, links when P1 can act again. Empty = only the state"))
         self.chain.returnPressed.connect(self.run)
         self.compare = QComboBox()
         self.compare.setToolTip(tr("Also simulates another version of the character (the one saved on disk or a backup) and shows both side by side, tick by tick"))
+        self.compare.activated.connect(lambda _: self._param_changed())
         self.sim_b = None
         self.p2_mode = QComboBox()
         for label, *_ in P2_MODES:
             self.p2_mode.addItem(label)
+        self.p2_mode.setCurrentIndex(max(0, min(len(P2_MODES) - 1, int(prefs.get("p2_mode", 0)))))
         self.p2_mode.setToolTip(tr("How P2 waits for the move: the guard follows the HitDef guardflag"))
+        self.p2_mode.activated.connect(lambda _: self._param_changed())
         self.sound = QCheckBox(tr("Sound"))
-        self.sound.setChecked(True)
-        self.sound.setToolTip(tr("Plays the move sounds (PlaySnd, hit and guard) during playback"))
+        self.sound.setChecked(bool(prefs.get("sound", True)))
+        self.sound.setToolTip(tr("Plays the move sounds (PlaySnd, hit and guard) during playback, at normal speed"))
         self.sound.toggled.connect(self._sound_toggled)
         self.audio = SoundPlayer()
+        if not self.audio.available():
+            self.sound.setChecked(False)
+            self.sound.setEnabled(False)
+            self.sound.setToolTip(tr("Sound is not available on this system"))
         self._clock: tuple[int, float] | None = None   # (tick, hora) em que o play (re)começou
         self._play_pos = -1
         run = QPushButton(tr("Simulate"))
         run.setProperty("primary", True)
+        run.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # o espaço é do play, não do botão
         run.clicked.connect(self.run)
         self.run_btn = run
-        compact(self.state, self.dist, self.max_ticks, self.zoom, self.p2_mode, self.compare)
+        compact(self.state, self.dist, self.max_ticks, self.zoom, self.p2_mode, self.compare, self.background)
         run.setMinimumHeight(32)
         self.player = tool_bar([
             ("step_back", tr("Previous tick (,)"), lambda: self.step(-1)),
             ("play", tr("Play / pause (space)"), self.toggle_play, True),
             ("step_fwd", tr("Next tick (.)"), lambda: self.step(1)),
             None,
+            ("left", tr("Previous hit or phase (Shift+Left)"), lambda: self.jump_mark(-1)),
+            ("right", tr("Next hit or phase (Shift+Right)"), lambda: self.jump_mark(1)),
+            ("loop", tr("Repeat (L)"), self._set_repeat, True),
+            MORE,
+            ("fade_in", tr("Repeat from this tick ([)"), lambda: self.mark_loop(True)),
+            ("fade_out", tr("Repeat up to this tick (])"), lambda: self.mark_loop(False)),
+            ("close", tr("Repeat the whole move"), self.clear_loop),
+            None,
             ("export", tr("Save GIF…"), self.save_gif),
             ("sheet_save", tr("Save tick-by-tick sheets…"), self.save_sheets),
         ])
         self.play_action = self.player.actions_by_tip[tr("Play / pause (space)")]
+        self.repeat_action = self.player.actions_by_tip[tr("Repeat (L)")]
+        self._repeat = bool(prefs.get("repeat", True))
+        self.repeat_action.setChecked(self._repeat)
         self._set_player(False)
+        self.speed = QComboBox()
+        for label, v in SPEEDS:
+            self.speed.addItem(label, v)
+        self.speed.setCurrentIndex(max(0, self.speed.findData(float(prefs.get("speed", 1.0)))))
+        self.speed.setToolTip(tr("Playback speed"))
+        self.speed.currentIndexChanged.connect(self._speed_changed)
+        self.speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.info = QLabel(tr("Pick a state and click Simulate."))
         self.info.setWordWrap(True)
         self.info.setObjectName("dim")
@@ -500,11 +688,46 @@ class SimulatorPage(QWidget):
         self.events.itemActivated.connect(self.on_event)
         self.events.itemClicked.connect(self.on_event)
         setup = Section(tr("Simulation"), "sim.setup")
-        setup.add(form_row(tr("State"), self.state, self.reload_states),form_row(tr("Chain"), self.chain), form_row("P2", self.p2_mode),
-                  form_row(tr("Distance"), self.dist), form_row(tr("Max ticks"), self.max_ticks),
-                  form_row(tr("Compare"), self.compare), run)
+        setup.add(form_row(tr("State"), self.state, self.reload_states), form_row(tr("Chain"), self.chain),
+                  form_row("P2", self.p2_mode), form_row(tr("Distance"), self.dist), run)
+        advanced = Section(tr("Advanced"), "sim.advanced", collapsed=True)
+        advanced.add(form_row(tr("Max ticks"), self.max_ticks), form_row(tr("Compare"), self.compare))
+
+        # camadas: o que aparece na prévia e no GIF
+        hidden = set(prefs.get("hidden", ()))
+        self.layer_checks: dict[str, QCheckBox] = {}
+        grid_box = QWidget()
+        grid_box.setObjectName("plain")
+        grid = QGridLayout(grid_box)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+        for k, (key, label, tip) in enumerate(LAYERS):
+            cb = QCheckBox(label)
+            cb.setToolTip(tip)
+            cb.setChecked(key not in hidden)
+            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            cb.toggled.connect(lambda _: self._layers_changed())
+            self.layer_checks[key] = cb
+            grid.addWidget(cb, k // 2, k % 2)
+        self.preset = QComboBox()
+        for key, label, _hidden in VIEW_PRESETS:
+            self.preset.addItem(label, key)
+        self.preset.addItem(tr("Custom"), None)
+        self.preset.setToolTip(tr("Ready-made sets of layers"))
+        self.preset.activated.connect(self._apply_preset)
+        compact(self.preset)
+        self.items_list = QListWidget()
+        self.items_list.setToolTip(tr("Hide one helper or one explod of this move"))
+        self.items_list.setMaximumHeight(112)
+        self.items_list.itemChanged.connect(self._item_toggled)
+        self.items_list.hide()
+        layers = Section(tr("Layers"), "sim.layers", collapsed=True)
+        layers.add(form_row(tr("Show"), self.preset), grid_box, self.items_list)
+        self._sync_preset()
+
         view = Section(tr("Display"), "sim.view")
-        view.add(form_row(tr("Zoom"), self.zoom), self.boxes, self.p2, self.sound, self.player)
+        view.add(form_row(tr("Background"), self.background), form_row(tr("Quality"), self.zoom), self.sound)
         # dano do golpe: cada acerto/defesa, total, vida que sobra ao P2 e energia
         self.damage = QLabel()
         self.damage.setObjectName("dim")
@@ -530,7 +753,9 @@ class SimulatorPage(QWidget):
         lv.addWidget(setup)
         lv.addWidget(self.info)
         lv.addWidget(damage)
+        lv.addWidget(layers)
         lv.addWidget(view)
+        lv.addWidget(advanced)
         lv.addWidget(events, 1)
         self.left = SidePanel(tr("Simulator"), content, header=False)
 
@@ -539,6 +764,8 @@ class SimulatorPage(QWidget):
         self.view_b = TickView()
         self.view_b.placeholder = (tr("Version B"), "")
         self.view_b.hide()
+        self.view.viewChanged.connect(lambda z, pan: self._view_moved(self.view_b, z, pan))
+        self.view_b.viewChanged.connect(lambda z, pan: self._view_moved(self.view, z, pan))
         self.ab_label = QLabel()
         self.ab_label.setObjectName("dim")
         self.ab_label.setContentsMargins(12, 4, 12, 0)
@@ -554,9 +781,34 @@ class SimulatorPage(QWidget):
         self.timeline.open_item.connect(self.open_item)
         self.timeline.moved.connect(self.move_item)
         self.timeline.can_drag = self._can_drag
+        self._hidden_rows = set(prefs.get("hidden_rows", ()))
+        self.timeline.set_hidden_rows(self._hidden_rows)
         self.fd_label = QLabel("")
         self.fd_label.setObjectName("dim")
         self.fd_label.setTextFormat(Qt.TextFormat.RichText)
+
+        # zoom, faixas da linha do tempo, modo limpo e a lista de atalhos, à direita do play
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setObjectName("dim")
+        self.zoom_label.setMinimumWidth(40)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setToolTip(tr("100% fits the image in the area"))
+        self.rows_btn = tool_button("guides", tr("Timeline rows"), lambda: None)
+        self.rows_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        rows_menu = QMenu(self.rows_btn)
+        for key, name in self.timeline.all_rows:
+            a = rows_menu.addAction(name)
+            a.setCheckable(True)
+            a.setChecked(key not in self._hidden_rows)
+            a.toggled.connect(lambda on, k=key: self._row_toggled(k, on))
+        self.rows_btn.setMenu(rows_menu)
+        self.clean_btn = tool_button("panel_hide", tr("Clean view: only the image and the player (H)"), self._set_clean, True)
+        keys_btn = tool_button("help", tr("Keys: space play · , . tick · Shift+arrows next hit or phase · Home End · "
+                                          "L repeat · [ ] repeat range · + - 0 zoom · B boxes · H clean view"), lambda: None)
+        view_tools = [tool_button("zoom_out", tr("Zoom out (-)"), lambda: self.view.zoom_by(0.8)), self.zoom_label,
+                      tool_button("zoom_in", tr("Zoom in (+)"), lambda: self.view.zoom_by(1.25)),
+                      tool_button("fit", tr("Fit the image (0)"), self.view.reset_view), self.rows_btn, self.clean_btn, keys_btn]
+
         bottom_bar = QWidget()
         bottom_bar.setObjectName("docStrip")
         bottom_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -569,7 +821,20 @@ class SimulatorPage(QWidget):
         top.addWidget(self.tick_label)
         rows.addLayout(top)
         rows.addWidget(self.timeline)
-        rows.addWidget(self.slider)
+        transport = QHBoxLayout()
+        transport.setSpacing(6)
+        # numa caixa de tamanho fixo: a faixa quebra linha e não pede largura à barra
+        player_box = QWidget()
+        player_box.setObjectName("plain")
+        player_box.setFixedSize(262, 32)
+        self.player.setParent(player_box)
+        self.player.setGeometry(0, 0, 262, 32)
+        transport.addWidget(player_box)
+        transport.addWidget(self.speed)
+        transport.addWidget(self.slider, 1)
+        for w in view_tools:
+            transport.addWidget(w)
+        rows.addLayout(transport)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -584,8 +849,193 @@ class SimulatorPage(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(round(1000 / 60))
         self.timer.timeout.connect(self._play_tick)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._install_keys()
+        self.clean_btn.setChecked(bool(prefs.get("clean", False)))
         ctx.characterChanged.connect(self.load)
         ctx.modelChanged.connect(self._model_changed)
+
+    def _install_keys(self) -> None:
+        """Teclas do player na página e no painel. Num campo de texto as letras, as setas e o
+        espaço continuam sendo do campo (o Qt dá preferência a ele)."""
+        keys = [("Space", lambda: self.play_action.trigger(), False),
+                (",", lambda: self.step(-1), True), ("Left", lambda: self.step(-1), True),
+                (".", lambda: self.step(1), True), ("Right", lambda: self.step(1), True),
+                ("Home", lambda: self.goto_end(False), False), ("End", lambda: self.goto_end(True), False),
+                ("L", lambda: self.repeat_action.trigger(), False),
+                ("[", lambda: self.mark_loop(True), False), ("]", lambda: self.mark_loop(False), False),
+                ("+", lambda: self.view.zoom_by(1.25), True), ("=", lambda: self.view.zoom_by(1.25), True),
+                ("-", lambda: self.view.zoom_by(0.8), True), ("0", self.view.reset_view, False),
+                ("B", self._toggle_boxes, False), ("H", lambda: self.clean_btn.toggle(), False)]
+        for host in (self, self.left):
+            for seq, fn, repeat in keys:
+                sc = QShortcut(QKeySequence(seq), host, fn)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.setAutoRepeat(repeat)
+
+    # ------------------------------------------------------------ preferências
+
+    def _prefs(self) -> dict:
+        p = self.ctx.settings.get("simulator")
+        return p if isinstance(p, dict) else {}
+
+    def _save_soon(self) -> None:
+        self._save_timer.start()
+
+    def _save_prefs(self) -> None:
+        self._save_timer.stop()
+        s = self.ctx.settings
+        s["simulator"] = {**self._prefs(), "dist": self.dist.value(), "max_ticks": self.max_ticks.value(),
+                          "p2_mode": self.p2_mode.currentIndex(), "quality": self.zoom.value(),
+                          "background": BACKGROUNDS[max(0, self.background.currentIndex())][0],
+                          "sound": self.sound.isChecked(), "speed": self.speed.currentData(),
+                          "repeat": self._repeat, "clean": self.clean_btn.isChecked(),
+                          "hidden": sorted(k for k, cb in self.layer_checks.items() if not cb.isChecked()),
+                          "hidden_rows": sorted(self._hidden_rows)}
+        s.save()
+
+    def _remember_move(self, state: int) -> None:
+        """Último golpe e corrente de cada personagem (os 30 mais recentes)."""
+        c = self.ctx.char
+        if not c:
+            return
+        chars = dict(self._prefs().get("chars") or {})
+        chars.pop(str(c.def_path), None)
+        chars[str(c.def_path)] = {"state": state, "chain": self.chain.text()}
+        self.ctx.settings["simulator"] = {**self._prefs(), "chars": dict(list(chars.items())[-30:])}
+        self._save_soon()
+
+    def _param_changed(self) -> None:
+        """Mudou um parâmetro: refaz a simulação que está na tela, sem precisar clicar."""
+        self._save_soon()
+        if self.sim is not None:
+            self._auto.start()
+
+    def _auto_run(self) -> None:
+        if self.sim is not None and self.isVisible() and self.run_btn.isEnabled():
+            self._resume_at = self.slider.value()
+            self.run()
+
+    # ------------------------------------------------------------ camadas
+
+    def _hide(self) -> frozenset:
+        return frozenset({k for k, cb in self.layer_checks.items() if not cb.isChecked()} | self._hidden_items)
+
+    def _bg(self):
+        c = self.background.currentData()
+        return tuple(c) if c is not None else None
+
+    def _layers_changed(self) -> None:
+        self._sync_preset()
+        self.show_tick()
+        self._save_soon()
+
+    def _sync_preset(self) -> None:
+        hidden = {k for k, cb in self.layer_checks.items() if not cb.isChecked()}
+        i = next((k for k, (_, _, h) in enumerate(VIEW_PRESETS) if h == hidden), self.preset.count() - 1)
+        self.preset.setCurrentIndex(i)
+
+    def _apply_preset(self, index: int) -> None:
+        if not 0 <= index < len(VIEW_PRESETS):
+            self._sync_preset()
+            return
+        hidden = VIEW_PRESETS[index][2]
+        for key, cb in self.layer_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(key not in hidden)
+            cb.blockSignals(False)
+        self._layers_changed()
+
+    def _toggle_boxes(self) -> None:
+        on = not (self.layer_checks["clsn1"].isChecked() or self.layer_checks["clsn2"].isChecked())
+        for key in ("clsn1", "clsn2"):
+            self.layer_checks[key].setChecked(on)
+
+    def _fill_items(self, sim) -> None:
+        """Helpers e explods deste golpe, para esconder um a um."""
+        from ...tools import simulate
+        found = simulate.layer_items(sim)
+        entries = [(("helper", n), n) for n in found["helpers"]] + \
+                  [(("explod", a), tr("Explod anim {0}").format(a)) for a in found["explods"]]
+        self._hidden_items &= {k for k, _ in entries}
+        self.items_list.blockSignals(True)
+        self.items_list.clear()
+        for key, label in entries:
+            it = QListWidgetItem(label)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Unchecked if key in self._hidden_items else Qt.CheckState.Checked)
+            it.setData(Qt.ItemDataRole.UserRole, key)
+            self.items_list.addItem(it)
+        self.items_list.blockSignals(False)
+        self.items_list.setVisible(bool(entries))
+
+    def _item_toggled(self, item) -> None:
+        key = tuple(item.data(Qt.ItemDataRole.UserRole))
+        if item.checkState() == Qt.CheckState.Checked:
+            self._hidden_items.discard(key)
+        else:
+            self._hidden_items.add(key)
+        self.show_tick()
+
+    # ------------------------------------------------------------ vista
+
+    def _view_moved(self, other: TickView, zoom: float, pan: QPointF) -> None:
+        other.set_view(zoom, pan)               # A e B aproximam juntos
+        self.zoom_label.setText(f"{round(zoom * 100)}%")
+
+    def _set_clean(self, on: bool) -> None:
+        self.timeline.setVisible(not on)
+        self.fd_label.setVisible(not on)
+        self._save_soon()
+
+    def _row_toggled(self, key: str, on: bool) -> None:
+        (self._hidden_rows.discard if on else self._hidden_rows.add)(key)
+        self.timeline.set_hidden_rows(self._hidden_rows)
+        self._save_soon()
+
+    # ------------------------------------------------------------ navegação e repetição
+
+    def goto_end(self, last: bool) -> None:
+        if self.sim:
+            self.slider.setValue(self.slider.maximum() if last else 0)
+
+    def jump_mark(self, d: int) -> None:
+        """Vai ao próximo (ou anterior) acerto, defesa ou troca de fase do golpe."""
+        cur = self.slider.value()
+        found = [m for m in self._marks if (m > cur if d > 0 else m < cur)]
+        if found:
+            self.slider.setValue(found[0] if d > 0 else found[-1])
+
+    def _index_of(self, t: int) -> int:
+        return next((i for i, r in enumerate(self.sim.track) if r["t"] >= t), len(self.sim.track) - 1)
+
+    def _build_marks(self, phases: list) -> None:
+        marks = {i for i in range(1, len(phases)) if phases[i] != phases[i - 1]}
+        marks |= {self._index_of(e["t"]) for e in self.sim.events if e["kind"] in ("acerto", "defesa")}
+        self._marks = sorted(marks)
+
+    def _set_repeat(self, on: bool) -> None:
+        self._repeat = on
+        self._save_soon()
+
+    def mark_loop(self, start: bool) -> None:
+        if not self.sim:
+            return
+        cur = self.slider.value()
+        a, b = self._loop or (0, self.slider.maximum())
+        self._loop = (cur, max(b, cur)) if start else (min(a, cur), cur)
+        self.timeline.set_loop(self._loop)
+        self._clock = None
+
+    def clear_loop(self) -> None:
+        self._loop = None
+        self.timeline.set_loop(None)
+        self._clock = None
+
+    def _speed_changed(self, _=None) -> None:
+        self._clock = None
+        self.audio.stop()
+        self._save_soon()
 
     def _set_player(self, on: bool) -> None:
         """Tocar, avançar e salvar só fazem sentido com uma simulação pronta."""
@@ -595,27 +1045,35 @@ class SimulatorPage(QWidget):
     def _model_changed(self, part) -> None:
         if part in ("states", "commands", "def"):
             self.fill_states()      # um estado ou golpe novo entra na lista na hora
+        if not self.run_btn.isEnabled():
+            self._rerun = True      # simulando a versão antiga: refaz quando ela terminar
+            return
         if self.sim:
+            self._resume_at = self.slider.value()
             self.sim = None
             self._gen += 1
             self.play_action.setChecked(False)
             self._set_player(False)
-            if self.isVisible() and self.run_btn.isEnabled():
+            if self.isVisible():
                 # mudou à vista (desfazer, arrastar na linha do tempo): simula de novo no mesmo tick
-                self._resume_at = self.slider.value()
                 QTimer.singleShot(0, self.run)
             else:
+                self._stale = True  # simula de novo ao voltar para a página, no mesmo tick
                 self.timeline.set_data(None)
                 self.fd_label.setText(tr("The character changed: simulate again."))
 
     def hideEvent(self, e):  # noqa: N802 — trocar de página para o play e o som
         self.play_action.setChecked(False)
+        if self._save_timer.isActive():
+            self._save_prefs()
         super().hideEvent(e)
 
     def load(self) -> None:
         self.sim = None
         self._gen += 1
         self._want = None
+        self._stale = self._rerun = False
+        self._auto.stop()
         self._drop_pending_render()
         self.play_action.setChecked(False)
         self._set_player(False)
@@ -624,6 +1082,12 @@ class SimulatorPage(QWidget):
         self.cache.clear()
         self._failed.clear()
         self._audit_item = None
+        self._marks = []
+        self._hidden_items.clear()
+        self.items_list.clear()
+        self.items_list.hide()
+        self.clear_loop()
+        self.view.reset_view()
         self.events.clear()
         self.damage_sec.hide()
         self.view.set_message(*TickView.placeholder)
@@ -631,12 +1095,18 @@ class SimulatorPage(QWidget):
         self.fd_label.setText("")
         self.sim_b = None
         self.view_b.set_image(None)
+        self.view_b.hide()
+        self.ab_label.hide()
         self.fill_compare()
         c = self.ctx.char
         if not c:
             return
         self.file_tab.set_file(tr("{0} · simulation").format(c.name), "simulate")
         self.fill_states(keep=False)
+        last = (self._prefs().get("chars") or {}).get(str(c.def_path)) or {}
+        if self.state.findData(last.get("state")) >= 0:       # o último golpe testado neste personagem
+            self.state.setCurrentIndex(self.state.findData(last["state"]))
+        self.chain.setText(last.get("chain", ""))
         self.info.setText(tr("Pick a state and click Simulate."))
         # sem simulação a linha do tempo fica desligada (antes parecia pronta para arrastar)
         self.slider.setEnabled(False)
@@ -674,6 +1144,7 @@ class SimulatorPage(QWidget):
     def fill_compare(self) -> None:
         """Versões para o A/B: a salva no disco e os backups (o mais novo primeiro)."""
         cur = self.compare.currentData()
+        self.compare.blockSignals(True)
         self.compare.clear()
         self.compare.addItem(tr("Nothing"), None)
         c = self.ctx.char
@@ -685,21 +1156,14 @@ class SimulatorPage(QWidget):
                     self.compare.addItem(f"Backup {d.name}", str(d / c.def_path.name))
         i = self.compare.findData(cur)
         self.compare.setCurrentIndex(max(0, i))
+        self.compare.blockSignals(False)
 
     def showEvent(self, e):  # noqa: N802 — um backup novo aparece na lista
         self.fill_compare()
         super().showEvent(e)
-
-    def keyPressEvent(self, e):  # noqa: N802
-        k = e.key()
-        if k == Qt.Key.Key_Space:
-            self.play_action.toggle()
-        elif k in (Qt.Key.Key_Comma, Qt.Key.Key_Left):
-            self.step(-1)
-        elif k in (Qt.Key.Key_Period, Qt.Key.Key_Right):
-            self.step(1)
-        else:
-            super().keyPressEvent(e)
+        if self._stale and self.ctx.char:       # editou em outra página: já volta atualizado
+            self._stale = False
+            QTimer.singleShot(0, self.run)
 
     # ------------------------------------------------------------ simulação
 
@@ -729,6 +1193,9 @@ class SimulatorPage(QWidget):
             chain = ()
         if not c or n is None:
             return
+        self._auto.stop()
+        self._stale = False
+        self._remember_move(n)
         from ...tools import simulate
         dist, mx = self.dist.value(), self.max_ticks.value()
         _, pose, guard = P2_MODES[max(0, self.p2_mode.currentIndex())]
@@ -782,6 +1249,7 @@ class SimulatorPage(QWidget):
         self._failed.clear()
         self._want = None
         self.view_box = box
+        self._fill_items(sim)
         self.slider.blockSignals(True)
         self.slider.setRange(0, max(0, len(sim.track) - 1, len(self.sim_b.track) - 1 if self.sim_b else 0))
         # depois de arrastar um evento a simulação nova volta ao mesmo tick
@@ -790,6 +1258,8 @@ class SimulatorPage(QWidget):
         self.slider.blockSignals(False)
         self.slider.setEnabled(bool(sim.track))
         self._set_player(bool(sim.track))
+        if self._loop and self._loop[1] > self.slider.maximum():
+            self.clear_loop()                   # o golpe ficou mais curto que o trecho marcado
         self.ask_btn.setEnabled(True)
         guards = sum(1 for e in sim.events if e["kind"] == "defesa")
         hits = sum(1 for e in sim.events if e["kind"] == "acerto")
@@ -805,6 +1275,8 @@ class SimulatorPage(QWidget):
         from ...tools import movetimeline, simulate
         tl = movetimeline.build(sim)
         self.timeline.set_data(tl)
+        self.timeline.set_current(self.slider.value())
+        self._build_marks(tl["phases"])
         self._fd_main = tl["frame_data"]
         self.fd_label.setText(self._chain_text(simulate.chain_report(sim)) if sim.chain
                               else self._fd_text(self._fd_main))
@@ -824,6 +1296,10 @@ class SimulatorPage(QWidget):
         self._audit_item = QListWidgetItem(tr("Checking the effects…"))
         self._audit_item.setForeground(self.palette().placeholderText())
         self.events.addItem(self._audit_item)
+        if sim.ignored:
+            note = QListWidgetItem("ⓘ " + tr("Not reproduced in this preview: {0}").format(", ".join(sorted(sim.ignored))))
+            note.setToolTip(tr("These controllers ran, but the simulator does not apply them: check them in the engine"))
+            self.events.addItem(note)
         for ev in sim.events:
             snd = ev.get("snd")
             if ev["kind"] == "ctrl" and ev.get("value") == "playsnd" and snd:
@@ -842,6 +1318,13 @@ class SimulatorPage(QWidget):
             self.events.addItem(it)
         self.view.set_message(tr("Drawing…"))
         self.show_tick()             # o primeiro tick entra na fila antes da auditoria
+        focus = self.window().focusWidget() if self.window() else None
+        if not isinstance(focus, QLineEdit) and self.isVisible():
+            self.setFocus()          # o teclado já controla o player
+        if self._rerun:              # o personagem mudou enquanto esta simulação rodava
+            self._rerun = False
+            self._resume_at = self.slider.value()
+            QTimer.singleShot(0, self.run)
         job = Job(lambda: (gen, simulate.audit(sim)))
         job.signals.done.connect(self._audited)
         job.signals.failed.connect(self._audit_failed)
@@ -874,6 +1357,7 @@ class SimulatorPage(QWidget):
         for k, p in enumerate(problems):
             it = QListWidgetItem(f"⚠ {p['message']}")       # a mensagem já vem traduzida; o kind é para scripts
             it.setToolTip(p["kind"])
+            it.setData(Qt.ItemDataRole.UserRole, p.get("t"))    # clicar leva ao tick do problema
             self.events.insertItem(row + k, it)
 
     def _audit_failed(self, msg: str) -> None:
@@ -1018,13 +1502,12 @@ class SimulatorPage(QWidget):
     def on_event(self, item) -> None:
         t = item.data(Qt.ItemDataRole.UserRole)
         if t is not None and self.sim:
-            idx = next((i for i, r in enumerate(self.sim.track) if r["t"] >= t), len(self.sim.track) - 1)
-            self.slider.setValue(idx)
+            self.slider.setValue(self._index_of(t))
 
     # ------------------------------------------------------------ desenho dos ticks
 
     def _key(self, i: int) -> tuple:
-        return (i, self.zoom.value(), self.boxes.isChecked(), self.p2.isChecked())
+        return (i, self.zoom.value(), self._hide(), self._bg())
 
     def show_tick(self) -> None:
         if not self.sim or not self.sim.track or self.view_box is None:
@@ -1058,7 +1541,7 @@ class SimulatorPage(QWidget):
             return self.show_tick() if key == self._key(self.slider.value()) else self._prefetch()
         from ...tools import simulate
         sim, simb, box, gen = self.sim, self.sim_b, self.view_box, self._gen
-        i, zoom, boxes, p2 = key
+        i, zoom, hide, bg = key
         self._rendering = True
 
         def draw(s):                    # a versão mais curta fica no último tick dela
@@ -1068,7 +1551,7 @@ class SimulatorPage(QWidget):
             # A/B uses the same camera position as well as the same viewport dimensions.
             camera_rec = sim.track[min(i, len(sim.track) - 1)]
             window = simulate.preview_tick_window(camera_rec, box)
-            return simulate.render_tick(s, rec, window, zoom=zoom, boxes=boxes, show_p2=p2)
+            return simulate.render_tick(s, rec, window, zoom=zoom, hide=hide, background=bg, hurtboxes=True)
         def work():
             try:
                 return gen, key, (draw(sim), draw(simb))
@@ -1141,6 +1624,10 @@ class SimulatorPage(QWidget):
     def toggle_play(self, on: bool) -> None:
         self._clock = None
         self.audio.stop()
+        if on and self.sim and not self._repeat:     # no fim do golpe, o play recomeça do início
+            first, last = self._loop or (0, self.slider.maximum())
+            if self.slider.value() >= last:
+                self.slider.setValue(first)
         (self.timer.start if on and self.sim else self.timer.stop)()
 
     def _sound_toggled(self, on: bool) -> None:
@@ -1149,16 +1636,21 @@ class SimulatorPage(QWidget):
         self._clock = None          # o play recomeça do tick atual, já com ou sem som
 
     def _play_tick(self) -> None:
-        """Play em tempo real (60 ticks por segundo) com o som junto. Se o desenho de um tick
-        atrasa, a imagem e o som esperam e recomeçam juntos dali."""
+        """Play na velocidade escolhida (1x = 60 ticks por segundo), com o som junto em 1x. Se o
+        desenho de um tick atrasa, a imagem e o som esperam e recomeçam juntos dali."""
         if not self.sim:
             return
-        cur, last = self.slider.value(), self.slider.maximum()
+        cur = self.slider.value()
+        first, last = self._loop or (0, self.slider.maximum())
+        speed = self.speed.currentData() or 1.0
         if cur != self._play_pos:           # a linha do tempo foi mexida à mão
             self._clock = None
             self.audio.stop()
         now = time.monotonic()
         if self._clock is None:
+            if not first <= cur <= last:    # fora do trecho repetido: entra nele
+                cur = first
+                self.slider.setValue(cur)
             self._play_pos = cur
             missing = [j for j in range(cur, min(last + 1, cur + 6))
                        if self._key(j) not in self.cache and self._key(j) not in self._failed]
@@ -1167,16 +1659,20 @@ class SimulatorPage(QWidget):
                     self._want = self._key(missing[0])
                 return self._kick()
             self._clock = (cur, now)
-            if self.sound.isChecked():
+            if self.sound.isChecked() and speed == 1.0:
                 self.audio.play(self.sim, self.sim.track[min(cur, len(self.sim.track) - 1)]["t"])
             return
         i0, t0 = self._clock
-        target = i0 + int((now - t0) * 60)
-        if target > last:                   # fim: volta ao começo
+        target = i0 + int((now - t0) * 60 * speed)
+        if target > last:                   # fim: repete ou para
             self._clock = None
             self.audio.stop()
-            self._play_pos = 0
-            self.slider.setValue(0)
+            if self._repeat:
+                self._play_pos = first
+                self.slider.setValue(first)
+            else:
+                self.slider.setValue(last)      # com atraso o relógio passa do fim: mostra o último tick
+                self.play_action.setChecked(False)
             return
         if target == cur:
             return
@@ -1184,7 +1680,7 @@ class SimulatorPage(QWidget):
             # o desenho ficou para trás: segura e recomeça do próximo tick quando ele chegar
             self._clock = None
             self.audio.stop()
-            target = cur + 1
+            target = min(cur + 1, last)
         self._play_pos = target
         self.slider.setValue(target)
 
@@ -1210,10 +1706,10 @@ class SimulatorPage(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, tr("Save simulation GIF"),
                                               f"state_{self.current_state()}.gif", "GIF (*.gif)")
         if path:
-            sim, zoom, boxes = self.sim, self.zoom.value(), self.boxes.isChecked()
+            sim, zoom, hide, bg = self.sim, self.zoom.value(), self._hide(), self._bg()
 
-            def work():
-                simulate.animation(sim, path, zoom=zoom, boxes=boxes)
+            def work():                 # o GIF sai com as camadas e o fundo da prévia
+                simulate.animation(sim, path, zoom=zoom, boxes=True, hide=hide, background=bg, hurtboxes=True)
                 return tr("GIF saved: {0}").format(path)
             self._save_in_background(tr("the GIF"), work)
 
@@ -1224,7 +1720,7 @@ class SimulatorPage(QWidget):
         d = QFileDialog.getExistingDirectory(self, tr("Folder for the tick-by-tick sheets"))
         if d:
             sim, name, zoom, boxes = self.sim, f"state_{self.current_state()}", self.zoom.value(), \
-                self.boxes.isChecked()
+                self.layer_checks["clsn1"].isChecked() or self.layer_checks["clsn2"].isChecked()
 
             def work():
                 paths = simulate.tick_pages(sim, d, name, zoom=zoom, boxes=boxes)
