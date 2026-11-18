@@ -15,7 +15,7 @@ import time
 import traceback
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QSlider,
                                QSizePolicy, QSpinBox, QToolButton, QVBoxLayout, QWidget)
@@ -434,6 +434,63 @@ class SoundPlayer:
             pass
 
 
+class ElidedRichLabel(QLabel):
+    """Uma linha de texto rico que nunca pede largura à página: o que não couber vira "…" e o
+    texto inteiro fica na dica. `text()` devolve sempre o texto completo."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._full = text
+        self._fit()
+
+    def text(self) -> str:
+        return self._full
+
+    def shown(self) -> str:
+        return super().text()
+
+    def setText(self, text: str) -> None:  # noqa: N802 — mesmo nome do QLabel
+        self._full = text
+        self._fit()
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._fit()
+
+    def _cut(self, doc: QTextDocument, chars: int) -> QTextDocument:
+        out = doc.clone()
+        out.setDocumentMargin(0)
+        cursor = QTextCursor(out)
+        cursor.setPosition(chars)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertText("…")
+        return out
+
+    def _fit(self) -> None:
+        self.ensurePolished()
+        room = self.contentsRect().width()
+        doc = QTextDocument()
+        doc.setDefaultFont(self.font())
+        doc.setDocumentMargin(0)
+        doc.setHtml(self._full)
+        if room <= 0 or doc.idealWidth() <= room:
+            self.setToolTip("")
+            super().setText(self._full)
+            return
+        low, high = 0, doc.characterCount() - 1
+        while low < high:                   # o maior corte que ainda cabe na largura
+            mid = (low + high + 1) // 2
+            if self._cut(doc, mid).idealWidth() <= room:
+                low = mid
+            else:
+                high = mid - 1
+        self.setToolTip(self._full)
+        super().setText(self._cut(doc, low).toHtml())
+
+
 class TickView(QLabel):
     """Imagem do tick. 100% cabe na área; a roda aproxima no ponto do mouse, arrastar move a
     imagem aproximada e o duplo clique volta a caber."""
@@ -766,7 +823,7 @@ class SimulatorPage(QWidget):
         self.view_b.hide()
         self.view.viewChanged.connect(lambda z, pan: self._view_moved(self.view_b, z, pan))
         self.view_b.viewChanged.connect(lambda z, pan: self._view_moved(self.view, z, pan))
-        self.ab_label = QLabel()
+        self.ab_label = ElidedRichLabel()
         self.ab_label.setObjectName("dim")
         self.ab_label.setContentsMargins(12, 4, 12, 0)
         self.ab_label.hide()
@@ -783,9 +840,8 @@ class SimulatorPage(QWidget):
         self.timeline.can_drag = self._can_drag
         self._hidden_rows = set(prefs.get("hidden_rows", ()))
         self.timeline.set_hidden_rows(self._hidden_rows)
-        self.fd_label = QLabel("")
+        self.fd_label = ElidedRichLabel()
         self.fd_label.setObjectName("dim")
-        self.fd_label.setTextFormat(Qt.TextFormat.RichText)
 
         # zoom, faixas da linha do tempo, modo limpo e a lista de atalhos, à direita do play
         self.zoom_label = QLabel("100%")

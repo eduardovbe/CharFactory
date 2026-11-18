@@ -166,3 +166,24 @@ def test_remembers_the_last_move_of_the_character(page):
     sp.state.setCurrentIndex(0)
     sp.load()
     assert sp.current_state() == 210
+
+
+def test_long_frame_data_never_widens_the_page(page):
+    app, ctx, win, sp = page
+    simulated(app, sp)
+    win.resize(1200, 800)
+    app.processEvents()
+    width = sp.width()
+    long = "<b>Preparo 6</b> · " + " · ".join(f"cancela no acerto {i}" for i in range(60))
+    for label in (sp.fd_label, sp.ab_label):
+        label.show()
+        label.setText(long)
+        app.processEvents()
+        sp.layout().activate()
+        assert sp.minimumSizeHint().width() < width and sp.width() == width
+        assert label.text() == long and label.toolTip() == long
+    shown = sp.fd_label.shown()
+    assert shown != long and "…" in shown
+    win.resize(1900, 800)
+    app.processEvents()
+    assert len(sp.fd_label.shown()) > len(shown)
