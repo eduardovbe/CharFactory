@@ -461,6 +461,9 @@ class CodePage(QWidget):
                         "text": (lambda i=i: self._state_text(c.states[i]))}
                        for i, st in enumerate(c.states)]
             common = c.common_states
+            if common and common.path != c.path_of("stcommon"):     # o .def passou a apontar outro arquivo
+                self.ctx.reset_cache("common_states")
+                common = c.common_states
             if common and all(st.path != common.path for st in c.states):
                 sources.append({"kind": "common_states", "path": common.path,
                                 "zss": isinstance(common, zssread.ZssStates),

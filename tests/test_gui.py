@@ -90,7 +90,7 @@ def test_open_loads_only_the_visible_code_page(gui):
     assert win.current_page() is win.defs and win.defs.files
     assert not win.states.files and not win.cmds.files and not win.air_code.files
     win.show_page(win.states)
-    assert [f["path"].name for f in win.states.files] == ["kfm.cns"]
+    assert [f["path"].name for f in win.states.files] == ["kfm.cns", "common1.cns"]
     assert win.states.tree.topLevelItemCount()
     # trocar de personagem recarrega a página à vista e esvazia as outras
     other = work.parent / "kfm2"
@@ -1898,6 +1898,8 @@ def test_sprite_canvas_drags_the_sprite_without_ctrl(gui):
 def test_stage_backdrop_puts_the_stage_ground_on_the_axis(gui, mugen_dir):
     from charfactory.gui import backdrop
     app, ctx, win, _ = gui
+    if not (mugen_dir / "stages" / "stage0.def").exists():
+        pytest.skip("esta instalação do MUGEN não tem o stages/stage0.def")
     ctx.settings["mugen_dir"] = str(mugen_dir)
     ctx.settings["backdrop"] = {"kind": "stage", "path": str(mugen_dir / "stages" / "stage0.def")}
     bg, warn = backdrop.build(ctx)
