@@ -1,6 +1,10 @@
 {
  "Resource usages": "Utilisations de la ressource",
+ "Navigate back": "Reculer dans la navigation",
+ "Navigate forward": "Avancer dans la navigation",
  "Find resource usages…": "Rechercher les utilisations de la ressource…",
+ "Reopen projects and restore the previous session on startup": "Rouvrir les projets et restaurer la session précédente au démarrage",
+ "Could not reopen {0} project(s) from the previous session.": "Impossible de rouvrir {0} projet(s) de la session précédente.",
  "Resource: anim 200, state 1000, sprite 200,0 or sound 5,0": "Ressource : anim 200, state 1000, sprite 200,0 ou sound 5,0",
  "Use anim 200, state 1000, sprite 200,0 or sound 5,0.": "Utilisez anim 200, state 1000, sprite 200,0 ou sound 5,0.",
  "Possible usage (expression)": "Utilisation possible (expression)",

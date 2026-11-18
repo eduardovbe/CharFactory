@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Restore open characters, the active editor, code cursors and selected animation frames on startup (configurable in Options). Missing projects are skipped; opening a file explicitly takes precedence.
+- Navigation history across editors and open characters with Alt+Left / Alt+Right.
 - Find resource usages with Shift+F12: sprites, animations, states and sounds, using unsaved editor text. Results link to the source; calculated expressions are marked as possible usages, and ZSS results open the source statedef.
 
 ### Fixed

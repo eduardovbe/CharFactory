@@ -982,6 +982,8 @@ class SettingsDialog(QDialog):
         self.autosave.setValue(int(s.get("autosave_min", 5)))
         self.watch = QCheckBox(tr("Warn when a file changes outside the app (charfactory CLI, another editor)"))
         self.watch.setChecked(bool(s.get("file_watcher", True)))
+        self.restore_session = QCheckBox(tr("Reopen projects and restore the previous session on startup"))
+        self.restore_session.setChecked(bool(s.get("restore_session", True)))
         self.ffmpeg = QLineEdit(s.get("ffmpeg", ""))
         self.ffmpeg.setPlaceholderText(tr("empty = search the PATH (to import OGG/MP3/FLAC)"))
         b4 = QPushButton("…")
@@ -1067,7 +1069,8 @@ class SettingsDialog(QDialog):
             tr("Each profile keeps the engine, opponent, stage, who plays each side, life, power, rounds and "
                "the Ikemen GO options. The arrow next to Run in the toolbar switches profiles.")]))
         lay.addWidget(group(tr("Editing"), [
-            (tr("Automatic backup"), self.autosave), (tr("Undo limit"), self.undo_limit), self.watch]))
+            (tr("Automatic backup"), self.autosave), (tr("Undo limit"), self.undo_limit), self.watch,
+            self.restore_session]))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.save)
         bb.rejected.connect(self.reject)
@@ -1095,6 +1098,7 @@ class SettingsDialog(QDialog):
         s["run_profile"] = self.profile.currentText()
         s["autosave_min"] = self.autosave.value()
         s["file_watcher"] = self.watch.isChecked()
+        s["restore_session"] = self.restore_session.isChecked()
         s["ffmpeg"] = self.ffmpeg.text().strip()
         s["undo_limit"] = self.undo_limit.value()
         s["image_editor"] = self.image_editor.text().strip()

@@ -288,6 +288,8 @@ _HEADER = re.compile(r"^\s*\[[^\]]+\]")
 class CodeEdit(QPlainTextEdit):
     # ('anim'|'state'|'sound', a, b): F12 ou Ctrl+clique sobre uma referência
     definitionRequested = Signal(str, int, int)
+    navigationStarted = Signal()
+    navigationFinished = Signal()
     auto_indent = True       # Enter mantém o recuo da linha (Editar › Recuo automático)
 
     def __init__(self, theme: Theme):
@@ -471,7 +473,10 @@ class CodeEdit(QPlainTextEdit):
         self._refold()
 
     def goto_line(self, line: int) -> None:
+        self.navigationStarted.emit()
         block = self.document().findBlockByNumber(max(0, line - 1))
+        if not block.isValid():
+            block = self.document().lastBlock()
         if block.isValid() and not block.isVisible():
             self._set_folded(self._header_of(block), False)
             self._refold()
@@ -479,6 +484,7 @@ class CodeEdit(QPlainTextEdit):
         self.setTextCursor(c)
         self.centerCursor()
         self.setFocus()
+        self.navigationFinished.emit()
 
     # ------------------------------------------------------------ realces
 

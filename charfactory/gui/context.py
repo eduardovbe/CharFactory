@@ -22,8 +22,9 @@ def config_path() -> Path:
 
 class Settings(dict):
     DEFAULTS = {"theme": "Default", "mugen_dir": "", "ikemen_dir": "", "run_engine": "auto", "recent": [], "geometry": None,
-                "onion_on": False, "onion_opacity": 35, "zoom": 2, "autosave_min": 5, "file_watcher": True,
-                "undo_limit": 100, "snippets": {}, "ui_font_size": 9.0, "code_font_size": 10.5}
+                "onion_opacity": 35, "zoom": 2, "autosave_min": 5, "file_watcher": True,
+                "undo_limit": 100, "snippets": {}, "ui_font_size": 9.0, "code_font_size": 10.5,
+                "restore_session": True}
 
     @classmethod
     def load(cls) -> "Settings":
@@ -160,6 +161,7 @@ class UndoStack:
 
 class AppContext(QObject):
     """Sinais globais: os editores escutam e se atualizam."""
+    characterChanging = Signal()      # antes de substituir o modelo, guarda a vista atual
     characterChanged = Signal()       # outro personagem ativo (aberto ou trocado de aba)
     projectsChanged = Signal()        # lista de projetos abertos mudou
     modelChanged = Signal(str)        # parte alterada: sprites, anims, states, commands, sounds, def
@@ -194,6 +196,7 @@ class AppContext(QObject):
                 return c
         mugen = self.settings.get("mugen_dir") or None
         c = project.load(def_path, mugen)
+        self.characterChanging.emit()
         self.projects.append(c)
         self.history[id(c)] = UndoStack(c, int(self.settings.get("undo_limit", 100)))
         self.settings.add_recent(str(c.def_path))
@@ -211,6 +214,7 @@ class AppContext(QObject):
             return None
         i = self.projects.index(c)
         new = project.load(c.def_path, self.settings.get("mugen_dir") or None)
+        self.characterChanging.emit()
         self.projects[i] = new
         self.history.pop(id(c), None)
         self.history[id(new)] = UndoStack(new, int(self.settings.get("undo_limit", 100)))
@@ -222,10 +226,13 @@ class AppContext(QObject):
 
     def activate(self, c: project.Character) -> None:
         if c is not self.char and c in self.projects:
+            self.characterChanging.emit()
             self.char = c
             self.characterChanged.emit()
 
     def close(self, c: project.Character) -> None:
+        if self.char is not None:
+            self.characterChanging.emit()
         if c in self.projects:
             self.projects.remove(c)
             self.history.pop(id(c), None)

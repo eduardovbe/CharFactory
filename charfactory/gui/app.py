@@ -30,6 +30,7 @@ from .editors.codepages import CodePage
 from .editors.sounds import SoundEditor
 from .editors.sprites import SpriteEditor
 from .icons import icon
+from .workspace import Workspace, navigation_step
 from .widgets import SegmentedTabs, Section, install_ui_polish, install_wheel_guard
 from ..i18n import tr
 
@@ -229,6 +230,8 @@ class MainWindow(QMainWindow):
         MainWindow.apply_ui_font()
         super().__init__()
         self.ctx = ctx
+        self.workspace = Workspace(self)
+        ctx.characterChanging.connect(self.workspace.before_character)
         self.restart_requested = False    # trocar o idioma reabre o app ao fechar
         Section.store = ctx.settings      # seções recolhidas dos painéis são lembradas
         install_wheel_guard(QApplication.instance())
@@ -441,6 +444,10 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.progress)
 
         self.build_menus()
+        for page in self.code_pages:
+            page.tabs.currentChanged.connect(self.workspace.record)
+        for page in (self.sprites, self.anims, self.sounds):
+            page.nav.indexChanged.connect(self.workspace.record)
         self.build_toolbars()
         self.apply_menu_font()
         ctx.status.connect(self.flash)
@@ -525,6 +532,10 @@ class MainWindow(QMainWindow):
         self.act(e, tr("Copy"), lambda: self._edit("copy"), "Ctrl+C", "copy")
         self.act(e, tr("Paste"), lambda: self._edit("paste"), "Ctrl+V", "paste")
         e.addSeparator()
+        self.back_action = self.act(e, tr("Navigate back"), lambda: self.workspace.travel(-1), "Alt+Left", "left")
+        self.forward_action = self.act(e, tr("Navigate forward"), lambda: self.workspace.travel(1), "Alt+Right", "right")
+        self.back_action.setEnabled(False)
+        self.forward_action.setEnabled(False)
         self.usages_action = self.act(e, tr("Find resource usages…"), self.find_usages, "Shift+F12", "find")
         e.addSeparator()
         self.act(e, tr("Find…"), self.find_text, "Ctrl+F", "find")
@@ -846,6 +857,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ páginas
 
+    @navigation_step
     def show_page(self, page) -> None:
         if page is not None and page not in self.code_pages and self.ctx.char is not None:
             self.commit_code()          # o editor visual não pode trabalhar sobre texto velho
@@ -1162,17 +1174,18 @@ class MainWindow(QMainWindow):
         c = self.ctx.char
         if not c or not self.confirm_discard():
             return False
-        for p in self.code_pages:
-            p.tabs.clear()
-            p.files = []
         self.ctx.close(c)
         if not self.ctx.char:
+            for p in self.code_pages:
+                p.unload()
+            self.workspace.changing = False
             self.explorer.clear()
             self.msgs.setRowCount(0)
             self.welcome.refresh()
             self.show_page(None)
         self.watch_files()
         self.update_title()
+        self.workspace.update_actions()
         return True
 
     def new_character(self) -> None:
@@ -1269,6 +1282,7 @@ class MainWindow(QMainWindow):
         self.update_title()
         self.watch_files()
         self.ctx.status.emit(tr("{0} opened").format(c.name))
+        self.workspace.after_character()
 
     def update_title(self) -> None:
         c = self.ctx.char
@@ -1365,6 +1379,7 @@ class MainWindow(QMainWindow):
     def on_msg(self, row: int, _col: int) -> None:
         self.goto_code(self.msgs.item(row, 1).text(), self.msgs.item(row, 2).text())
 
+    @navigation_step
     def goto_code(self, filename: str, where: str) -> None:
         for p in self.code_pages:
             if not p.files and self.ctx.char:
@@ -1392,6 +1407,7 @@ class MainWindow(QMainWindow):
                         self.search_results.addItem(it)
         self.set_badge(1, self.search_results.count(), "badge")
 
+    @navigation_step
     def on_search_result(self, item) -> None:
         data = item.data(Qt.ItemDataRole.UserRole)
         if not data:
@@ -1544,6 +1560,7 @@ class MainWindow(QMainWindow):
         else:
             self.flash(summary)
 
+    @navigation_step
     def open_definition(self, kind: str, a: int, b: int = 0) -> None:
         """Abre no editor certo o que uma referência aponta (F12/Ctrl+clique, paleta, relatórios)."""
         c = self.ctx.char
@@ -2282,11 +2299,16 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self.commit_code()
+        active = self.ctx.char
+        self.workspace.remember()
         for c in list(self.ctx.projects):
             self.ctx.activate(c)
             if not self.confirm_discard():
                 e.ignore()
                 return
+        if active in self.ctx.projects:
+            self.ctx.activate(active)
+        self.workspace.save_session()
         self.ctx.settings["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
         self.ctx.settings.save()
         self.mcp.stop()
@@ -2321,6 +2343,10 @@ def run(app, argv: list[str]) -> int:
     win.show()
     if len(argv) > 1 and argv[1].lower().endswith((".def", *archive.ARCHIVE_SUFFIXES)):
         win.open_path(argv[1])
+    else:
+        failed = win.workspace.restore_session()
+        if failed:
+            win.flash(tr("Could not reopen {0} project(s) from the previous session.").format(len(failed)))
     code = app.exec()
     if win.restart_requested:
         from PySide6.QtCore import QProcess

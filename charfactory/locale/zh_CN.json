@@ -1,6 +1,10 @@
 {
  "Resource usages": "资源引用",
+ "Navigate back": "后退",
+ "Navigate forward": "前进",
  "Find resource usages…": "查找资源引用…",
+ "Reopen projects and restore the previous session on startup": "启动时重新打开项目并恢复上次会话",
+ "Could not reopen {0} project(s) from the previous session.": "无法重新打开上次会话中的 {0} 个项目。",
  "Resource: anim 200, state 1000, sprite 200,0 or sound 5,0": "资源：anim 200、state 1000、sprite 200,0 或 sound 5,0",
  "Use anim 200, state 1000, sprite 200,0 or sound 5,0.": "请输入 anim 200、state 1000、sprite 200,0 或 sound 5,0。",
  "Possible usage (expression)": "可能的引用（表达式）",

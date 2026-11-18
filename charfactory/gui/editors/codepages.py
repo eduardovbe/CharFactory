@@ -509,6 +509,10 @@ class CodePage(QWidget):
             ed.cursorPositionChanged.connect(self._sync_timer.start)
             ed.document().contentsChanged.connect(self._tree_timer.start)
             ed.definitionRequested.connect(self.ctx.request_definition)
+            workspace = getattr(self.window(), "workspace", None)
+            if workspace is not None:
+                ed.navigationStarted.connect(workspace.begin)
+                ed.navigationFinished.connect(workspace.end)
             box = QWidget()
             box.setObjectName("plain")
             bl = QVBoxLayout(box)
@@ -1184,6 +1188,6 @@ class CodePage(QWidget):
                 ln = int(where[1:]) if re.fullmatch(r"#\d+", where or "") else \
                     self.line_of(f["edit"].toPlainText().split("\n"), where)
                 if ln:
-                    QTimer.singleShot(0, lambda: f["edit"].goto_line(ln))
+                    f["edit"].goto_line(ln)
                 return True
         return False
