@@ -85,6 +85,12 @@ class Shortcuts:
             node.setProperty("cf_binding", key)
             binding = entries.setdefault(key, Binding(key, label, scope, list(defaults)))
             binding.nodes.append(node)
+        for binding in entries.values():
+            # a mesma ação em dois menus: o atalho fica só na que nasceu com ele (dois deixam o Qt sem executar nenhuma)
+            keyed = [n for n in binding.nodes if n.property("cf_default_keys")]
+            if keyed:
+                binding.nodes = keyed
+                binding.defaults = list(keyed[0].property("cf_default_keys"))
         return entries
 
     def apply(self):
