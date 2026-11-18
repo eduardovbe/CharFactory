@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Animations: inspect interpolated poses at individual ticks using the timeline or the preview tick slider, and resume playback from the selected tick (#12).
 - States: show and edit the referenced `stcommon` CNS/ZSS file, with undo, redo and saving (#13).
+- Simulator: keep a stable preview scale while following the camera, so distant helpers and long vertical trajectories no longer shrink the fighters (#13).
 
 ## [0.5.1] - 2026-11-09
 

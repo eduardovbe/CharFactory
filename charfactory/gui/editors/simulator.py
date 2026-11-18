@@ -17,7 +17,7 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSlider,
-                               QSpinBox, QToolButton, QVBoxLayout, QWidget)
+                               QSizePolicy, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..canvas import pil_to_qimage
 from ..context import AppContext
@@ -367,6 +367,7 @@ class TickView(QLabel):
         super().__init__()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(320, 240)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._pix: QPixmap | None = None
 
     def set_image(self, img) -> None:
@@ -749,7 +750,7 @@ class SimulatorPage(QWidget):
             # o mesmo golpe com o P2 no outro modo (defendendo ou não) roda depois, num trabalho à
             # parte (on_done): o primeiro tick não espera e um erro lá não derruba esta simulação
             sim.other_args = None if chain or pose == "air" else (c, n, dist, mx, pose, not guard)
-            box = simulate._window(sim) if sim.track else None
+            box = simulate.preview_window(sim) if sim.track else None
             simb = None
             if other:                   # A/B: a outra versão com a mesma simulação e a mesma câmera
                 from ... import project
@@ -757,7 +758,7 @@ class SimulatorPage(QWidget):
                 simb = simulate.simulate(cb, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
                                          chain=chain, from_ground=simulate.starts_on_ground(cb, n))
                 if simb.track and box:
-                    bb = simulate._window(simb)
+                    bb = simulate.preview_window(simb)
                     box = (min(box[0], bb[0]), max(box[1], bb[1]), min(box[2], bb[2]), max(box[3], bb[3]))
             return gen, sim, box, simb
 
@@ -1061,8 +1062,13 @@ class SimulatorPage(QWidget):
         self._rendering = True
 
         def draw(s):                    # a versão mais curta fica no último tick dela
-            return simulate.render_tick(s, s.track[min(i, len(s.track) - 1)], box, zoom=zoom,
-                                        boxes=boxes, show_p2=p2) if s and s.track else None
+            if not s or not s.track:
+                return None
+            rec = s.track[min(i, len(s.track) - 1)]
+            # A/B uses the same camera position as well as the same viewport dimensions.
+            camera_rec = sim.track[min(i, len(sim.track) - 1)]
+            window = simulate.preview_tick_window(camera_rec, box)
+            return simulate.render_tick(s, rec, window, zoom=zoom, boxes=boxes, show_p2=p2)
         def work():
             try:
                 return gen, key, (draw(sim), draw(simb))

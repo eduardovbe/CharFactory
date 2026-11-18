@@ -2768,7 +2768,7 @@ class Sim:
                              vfacing=e.vfacing, scale=e.scale, angle=e.angle, spr=e.spr,
                              trans=e.trans, alpha=e.alpha, label=e.label, owner=e.owner.name, age=e.t,
                              on_hit=e.on_hit, born=e.born, key=id(e)))
-        self.track.append(dict(t=self.tick, ents=ents, explods=exps,
+        self.track.append(dict(t=self.tick, camera_x=self.cam_x, ents=ents, explods=exps,
                                helper_states=sorted({h.stateno for h in self.helpers if h.alive}),
                                p2=dict(pos=tuple(self.p2.pos), state=self.p2.state,
                                        facing=self.p2.facing, shake=self.p2.shake,
@@ -3089,6 +3089,23 @@ def sheet(sim: Sim, every: int | None = None, zoom: int = 2, columns: int = 6, b
     for k, t in enumerate(tiles):
         out.paste(t.convert("RGB"), ((k % columns) * tw, (k // columns) * th))
     return out
+
+
+def preview_window(sim: Sim):
+    """Stable viewport size for interactive playback, independent of distant entities."""
+    h = max(1.0, sim.stand_h)
+    height = max(240 * sim.lc_ratio, 2.4 * h + 15)
+    width = max(320 * sim.lc_ratio, 5.2 * h, height * 4 / 3)
+    return (-math.ceil(width / 2), math.ceil(width / 2), -math.ceil(height - 15), 15)
+
+
+def preview_tick_window(rec: dict, window):
+    """Follow the camera and P1 vertically without resizing the preview on each move."""
+    p1 = next((e for e in rec["ents"] if e["name"] == "P1"), None)
+    cx = rec.get("camera_x", p1["pos"][0] if p1 else 0)
+    cy = min(0, p1["pos"][1]) if p1 else 0
+    dx, dy = round(cx), round(cy)
+    return window[0] + dx, window[1] + dx, window[2] + dy, window[3] + dy
 
 
 def _window(sim: Sim):
