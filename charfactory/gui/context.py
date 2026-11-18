@@ -5,6 +5,7 @@ import copy
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -74,6 +75,12 @@ def _files_text(doc) -> str:
     return s.text() if s is not None else ""
 
 
+@dataclass
+class UndoGroup:
+    token: str
+    states: dict
+
+
 class UndoStack:
     """Histórico por projeto. Cada entrada guarda o estado de UMA parte antes da mudança.
 
@@ -125,10 +132,47 @@ class UndoStack:
         (ações de um clique, como tons de cinza, não se juntam à anterior)."""
         self._when[part] = 0
 
+    def record_group(self, parts, label, token):
+        """Only merge adjacent calls from the same task; manual edits are barriers."""
+        current = {p: self._get(p) for p in parts if p in PARTS}
+        current = {p: obj for p, obj in current.items() if obj is not None}
+        if not current:
+            return
+        group = self.undo[-1][1] if self.undo and self.undo[-1][0] == "__group__" else None
+        if not isinstance(group, UndoGroup) or group.token != token:
+            group = UndoGroup(token, {})
+            self.undo.append(("__group__", group, label))
+            del self.undo[:-self.limit]
+        for part, obj in current.items():
+            if part not in group.states and part in self._last:
+                group.states[part] = self._last[part]
+            self._last[part] = _snapshot(part, obj)
+        self._when.clear()
+        self.redo.clear()
+
+    def task_at_top(self, token):
+        return bool(self.undo and self.undo[-1][0] == "__group__" and self.undo[-1][1].token == token)
+
     def _swap(self, src: list, dst: list) -> str | None:
         if not src:
             return None
         part, state, label = src.pop()
+        if part == "__group__":
+            current = {p: _snapshot(p, self._get(p)) for p in state.states if self._get(p) is not None}
+            # Restore definitions first, then their related assets as one operation.
+            if "def" in state.states and _files_text(self.char.definition) != _files_text(state.states["def"]):
+                for name in (*FILE_PARTS.values(), "constants"):
+                    self.char.__dict__.pop(name, None)
+            for p in sorted(state.states, key=lambda p: p != "def"):
+                restored = _snapshot(p, state.states[p])
+                self.char.__dict__[PARTS[p]] = restored
+                self._last[p] = _snapshot(p, restored)
+                self.char.mark(p)
+            if "states" in state.states:
+                self.char.__dict__.pop("constants", None)
+            dst.append((part, UndoGroup(state.token, current), label))
+            self._when.clear()
+            return tuple(state.states)
         cur = self._get(part)
         if cur is not None:
             dst.append((part, _snapshot(part, cur), label))
@@ -154,8 +198,10 @@ class UndoStack:
 
     def forget(self, *parts: str) -> None:
         """Esquece o histórico de partes recarregadas do disco."""
-        self.undo = [e for e in self.undo if e[0] not in parts]
-        self.redo = [e for e in self.redo if e[0] not in parts]
+        def keep(e):
+            return not (set(e[1].states) & set(parts)) if e[0] == "__group__" else e[0] not in parts
+        self.undo = [e for e in self.undo if keep(e)]
+        self.redo = [e for e in self.redo if keep(e)]
         for p in parts:
             self._last.pop(p, None)
             self.prime(p)
@@ -283,8 +329,10 @@ class AppContext(QObject):
         h = self.undo_stack()
         part = getattr(h, op)() if h else None
         if part:
-            self.modelChanged.emit(part)
-            self.status.emit((tr("Undone") if op == "do_undo" else tr("Redone")) + f": {part}")
+            parts = part if isinstance(part, tuple) else (part,)
+            for name in parts:
+                self.modelChanged.emit(name)
+            self.status.emit((tr("Undone") if op == "do_undo" else tr("Redone")) + ": " + ", ".join(parts))
         return part is not None
 
     def reset_cache(self, *names: str) -> None:

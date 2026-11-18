@@ -938,6 +938,12 @@ class MainWindow(QMainWindow):
         """Editar › desfazer/refazer/recortar/copiar/colar no editor atual. Nos editores de
         código vale o histórico do texto; nos visuais, o do modelo (sprites, animações, sons)."""
         page = self.current_page()
+        history = self.ctx.undo_stack()
+        stack = getattr(history, op, []) if history and op in ("undo", "redo") else []
+        if stack and stack[-1][0] == "__group__" and not any(p.is_modified() for p in self.code_pages):
+            getattr(self.ctx, op)()
+            self.update_title()
+            return
         if page in self.code_pages:
             ed = page.current_edit()
             if ed:

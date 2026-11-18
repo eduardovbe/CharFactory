@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import threading
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
@@ -55,6 +56,70 @@ class GuiHost(tools.Host):
         self._invoker = _Invoker()
         self.turn_parts: set[str] = set()       # partes alteradas na resposta atual do assistente
         self.tasks = []
+        self.active_tasks = {}
+        self._source = "external"
+
+    def begin_task(self, title, source="external"):
+        if source in self.active_tasks:
+            raise tools.ToolError("a task is already open; end it before beginning another")
+        task = {"id": uuid.uuid4().hex, "title": title[:180], "parts": {}, "steps": [], "running": True}
+        self.active_tasks[source] = task
+        return task["id"]
+
+    def end_task(self, source="external"):
+        task = self.active_tasks.pop(source, None)
+        if task:
+            task["running"] = False
+            if task["parts"]:
+                self.tasks.append(task)
+                self.tasks = self.tasks[-100:]
+                self.win.changes_panel.schedule()
+                return task
+        return None
+
+    def begin_edit_task(self, title):
+        return self.begin_task(title, self._source)
+
+    def end_edit_task(self):
+        task = self.end_task(self._source)
+        return task["id"] if task else None
+
+    @staticmethod
+    def _task_undo_count(history, token):
+        def belongs(entry):
+            return entry[0] == "__group__" and entry[1].token == token
+        total = sum(belongs(e) for e in history.undo)
+        trailing = 0
+        for e in reversed(history.undo):
+            if not belongs(e):
+                break
+            trailing += 1
+        return trailing if trailing == total else 0
+
+    def can_undo_task(self, task):
+        if task.get("running") or not task["parts"] or any(p.is_modified() for p in self.win.code_pages):
+            return False
+        for path in task["parts"]:
+            char = next((c for c in self.ctx.projects if str(c.def_path) == path), None)
+            h = self.ctx.history.get(id(char))
+            if h is None or not self._task_undo_count(h, task["id"]):
+                return False
+        return True
+
+    def undo_task(self, task):
+        if not self.can_undo_task(task):
+            return False
+        active = self.ctx.char
+        for path in task["parts"]:
+            char = next(c for c in self.ctx.projects if str(c.def_path) == path)
+            self.ctx.activate(char)
+            count = self._task_undo_count(self.ctx.undo_stack(), task["id"])
+            for _ in range(count):
+                self.ctx.undo()
+        if active in self.ctx.projects:
+            self.ctx.activate(active)
+        self.win.update_title()
+        return True
 
     def character(self):
         return self.ctx.char
@@ -73,14 +138,16 @@ class GuiHost(tools.Host):
         return parts
 
     def call(self, name: str, args: dict | None) -> tools.Result:
+        worker = getattr(getattr(self.win, "assistant", None), "worker", None)
+        source = "assistant" if worker and threading.current_thread() is worker.thread else "external"
         if threading.current_thread() is threading.main_thread():
-            return self._call(name, args)
+            return self._call(name, args, source)
         box: list = []
         done = threading.Event()
 
         def job():
             try:
-                box.append(self._call(name, args))
+                box.append(self._call(name, args, source))
             except Exception as e:  # noqa: BLE001  (a thread que espera não pode ficar presa)
                 box.append(tools.Result(f"{type(e).__name__}: {e}", is_error=True))
             done.set()
@@ -88,28 +155,44 @@ class GuiHost(tools.Host):
         done.wait()
         return box[0]
 
-    def _call(self, name: str, args: dict | None) -> tools.Result:
+    def _call(self, name: str, args: dict | None, source="external") -> tools.Result:
         t = tools.REGISTRY.get(name)
         if t and t.writes and self.ctx.settings.get("ai_confirm") and not self._confirm(t, args or {}):
             return tools.Result("the user declined this change", is_error=True)
         for p in self.win.code_pages:         # o agente lê e muda o que está nos editores
             p.apply_all()
         char = self.ctx.char
+        automatic = bool(t and t.writes and source not in self.active_tasks)
+        if automatic:
+            self.begin_task(_step_label(name, args or {}), source)
+        task = self.active_tasks.get(source)
         touched: set[str] = set()
         if char is not None and t and t.writes:
             mark = char.mark
             char.mark = lambda *what: (touched.update(what), mark(*what))
         try:
+            self._source = source
             res = tools.run(self, name, args)
         finally:
             if char is not None:
                 char.__dict__.pop("mark", None)
-        for part in sorted(touched):
-            self.ctx.changed(part)
+        if touched:
+            history = self.ctx.history.get(id(char))
+            char.mark(*touched)
+            if history and task:
+                history.record_group(touched, task["title"], task["id"])
+            for part in sorted(touched):
+                self.ctx.modelChanged.emit(part)
+            if task:
+                path = str(char.def_path)
+                task["parts"].setdefault(path, set()).update(touched)
+                task["steps"].append(_step_label(name, args or {}) + (" · " + tr("Error") if res.is_error else ""))
         if touched and not res.is_error:
             self.turn_parts |= touched
             self.ctx.status.emit(tr("AI changed: {0} (Ctrl+Z undoes)").format(
                 ", ".join(PART_NAMES.get(p, p) for p in sorted(touched))))
+        if automatic:
+            self.end_task(source)
         return res
 
     def run_engine(self, prof, engine: str | None = None) -> dict:
@@ -699,6 +782,7 @@ class AssistantPanel(QWidget):
 
     def _start(self, text: str | None) -> None:
         self.host.turn_parts.clear()
+        self.host.begin_task(getattr(self, "_last_text", "") or tr("AI task"), "assistant")
         self.worker = _Worker(self.agent, text)
         self.worker.event.connect(self.on_event)
         self.worker.finished_ok.connect(self.on_done)
@@ -754,12 +838,18 @@ class AssistantPanel(QWidget):
 
     def on_done(self) -> None:
         self._idle()
+        task = self.host.end_task("assistant")
+        if task:
+            self._add(("task", task["id"], task["title"]))
         if self.host.turn_parts:
             names = ", ".join(PART_NAMES.get(p, p) for p in sorted(self.host.turn_parts))
             self._add(("note", tr("AI changed: {0} (Ctrl+Z undoes)").format(names)))
 
     def on_failed(self, msg: str, status=None) -> None:
         self._idle()
+        task = self.host.end_task("assistant")
+        if task:
+            self._add(("task", task["id"], task["title"]))
         self._add(("error", msg, status))
 
     @staticmethod
@@ -792,6 +882,9 @@ class AssistantPanel(QWidget):
 
     def _render(self, item: tuple, u: dict) -> str:
         kind = item[0]
+        if kind == "task":
+            return (f"<div style='margin-top:6px'><a href='task:{item[1]}' style='color:{u['accent']}'>"
+                    f"{html.escape(tr('Review task changes'))}: {html.escape(item[2])}</a></div>")
         if kind == "user":
             body = html.escape(item[1]).replace("\n", "<br>")
             return (f"<table width='100%' cellspacing='0' cellpadding='0' style='margin-top:12px'><tr>"
@@ -831,7 +924,9 @@ class AssistantPanel(QWidget):
 
     def _link(self, url: QUrl) -> None:
         s = url.toString()
-        if s.startswith("step:"):
+        if s.startswith("task:"):
+            self.win.show_changes_task(s[5:])
+        elif s.startswith("step:"):
             call, res = self._steps[int(s[5:])]
             text = (f"{call.name}\n{json.dumps(call.args, ensure_ascii=False, indent=2)}\n\n"
                     f"── {tr('Result')} ──\n{res.text}")

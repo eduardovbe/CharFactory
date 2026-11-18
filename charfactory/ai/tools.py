@@ -140,6 +140,12 @@ class Host:
     def call(self, name: str, args: dict | None) -> Result:
         return run(self, name, args)
 
+    def begin_edit_task(self, title):
+        raise ToolError("task grouping requires the Char Factory editor window")
+
+    def end_edit_task(self):
+        raise ToolError("task grouping requires the Char Factory editor window")
+
 
 def run(host: Host, name: str, args: dict | None) -> Result:
     """Roda uma ferramenta e transforma qualquer erro em resultado de erro para o modelo."""
@@ -176,6 +182,18 @@ def run(host: Host, name: str, args: dict | None) -> Result:
 
 def describe() -> list[Tool]:
     return list(REGISTRY.values())
+
+
+@tool("Begin a named editing task in the GUI. Its consecutive changes across tools can be undone together. "
+      "Call end_edit_task when done, including after an error. Not needed by the built-in assistant.",
+      {"title": _str("Short task name in the user's language")}, ("title",))
+def begin_edit_task(host, char, title):
+    return {"task": host.begin_edit_task(title)}
+
+
+@tool("Finish the current editing task in the GUI and publish its changes summary.")
+def end_edit_task(host, char):
+    return {"task": host.end_edit_task()}
 
 
 # ======================================================================= personagem

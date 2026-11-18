@@ -34,6 +34,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Recovery: detect newer automatic backups, preview and recover selected files into the editor, including unapplied text and shared common states. Snapshots publish atomically and keep two generations; explicitly discarded changes stay dismissed.
 - Pending changes panel (Ctrl+Shift+D): compare live text and binary files with disk and revert an individual file while preserving changes in other files.
 - Keyboard shortcuts editor: search actions, change or clear bindings, detect conflicts and restore defaults. Bindings persist across sessions and interface languages.
+- AI task summaries and grouped undo/redo across changed parts, with manual edits kept as history barriers. External MCP clients can group operations with begin_edit_task / end_edit_task.
 - Restore open characters, the active editor, code cursors and selected animation frames on startup (configurable in Options). Missing projects are skipped; opening a file explicitly takes precedence.
 - Navigation history across editors and open characters with Alt+Left / Alt+Right.
 - Find resource usages with Shift+F12: sprites, animations, states and sounds, using unsaved editor text. Results link to the source; calculated expressions are marked as possible usages, and ZSS results open the source statedef.
