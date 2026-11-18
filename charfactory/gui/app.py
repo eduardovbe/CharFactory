@@ -255,6 +255,8 @@ class MainWindow(QMainWindow):
         self.pages = [self.defs, self.sprites, self.anims, self.cmds, self.states, self.sounds, self.air_code,
                       self.simulator]
         self.code_pages = [self.defs, self.cmds, self.states, self.air_code]
+        from .shortcuts import Shortcuts
+        self.shortcuts = Shortcuts(self)
 
         self.center = QStackedWidget()
         self.left_stack = QStackedWidget()
@@ -493,6 +495,7 @@ class MainWindow(QMainWindow):
 
     def act(self, menu, text, fn, shortcut=None, icon_name=None, checkable=False) -> QAction:
         a = QAction(text, self)
+        self.shortcuts.register_action(a, text)
         if icon_name:
             a.setIcon(icon(icon_name))
         if shortcut:
@@ -568,6 +571,7 @@ class MainWindow(QMainWindow):
         self.act(e, tr("Previous deprecated parameter"), lambda: self.jump_deprecated(-1))
         e.addSeparator()
         self.act(e, tr("Code snippets…"), self.edit_snippets, None, "snippet")
+        self.act(e, tr("Keyboard shortcuts…"), self.edit_shortcuts)
 
         v = mb.addMenu(tr("&View"))
         self.act(v, tr("Command palette…"), self.command_palette, "F1", "command")
@@ -786,6 +790,7 @@ class MainWindow(QMainWindow):
         # cada editor tem uma barra Extra de largura diferente: o _fit_toolbar dá a ela a
         # largura inteira (senão guardava a do editor anterior) ou encolhe se faltar espaço
         self._fit_toolbar()
+        self.shortcuts.apply()
 
     def _fill_extra(self, page) -> None:
         # clear() só tira as ações da barra; sem apagar, cada troca de página deixava ~18 QActions
@@ -795,8 +800,10 @@ class MainWindow(QMainWindow):
         self.extra.clear()
         for a in old:       # separadores o clear() já apaga
             if isValid(a) and a.parent() is self.extra:
+                a.setProperty("cf_shortcut_ignore", True)
                 a.deleteLater()
         for a in self._extra_keys:
+            a.setProperty("cf_shortcut_ignore", True)
             self.removeAction(a)
             a.deleteLater()
         self._extra_keys = []
@@ -2167,6 +2174,11 @@ class MainWindow(QMainWindow):
         for h in self.ctx.history.values():
             h.limit = int(self.ctx.settings.get("undo_limit", 100))
         self.watch_files()
+        self.shortcuts.apply()
+
+    def edit_shortcuts(self):
+        from .shortcuts import ShortcutsDialog
+        ShortcutsDialog(self.shortcuts, self).exec()
 
     def watch_files(self) -> None:
         if self.watcher.files():

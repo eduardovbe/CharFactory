@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, QStringListModel, Qt, Signal
-from PySide6.QtGui import (QColor, QFont, QPainter, QPen, QPolygonF, QSyntaxHighlighter, QTextCharFormat,
+from PySide6.QtGui import (QColor, QFont, QKeySequence, QPainter, QPen, QPolygonF, QShortcut, QSyntaxHighlighter, QTextCharFormat,
                            QTextCursor, QTextFormat)
 from PySide6.QtWidgets import QCompleter, QPlainTextEdit, QTextEdit, QToolTip, QWidget
 
@@ -319,6 +319,11 @@ class CodeEdit(QPlainTextEdit):
         self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.completer.setWidget(self)
         self.completer.activated.connect(self._insert_completion)
+        for key, label, fn in [("F12", tr("Go to definition"), self.go_to_definition),
+                               ("Ctrl+Space", tr("Show completions"), lambda: self._show_completer(force=True))]:
+            shortcut = QShortcut(QKeySequence(key), self, fn)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.setProperty("cf_binding_label", label)
         self.set_theme(theme)
 
     comment_prefix = ";"       # o que Ctrl+; põe no começo da linha (# no ZSS)
@@ -640,15 +645,9 @@ class CodeEdit(QPlainTextEdit):
         return super().event(e)
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key.Key_F12:
-            self.go_to_definition()
-            return
         popup = self.completer.popup()
         if popup.isVisible() and e.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Tab, Qt.Key.Key_Escape):
             e.ignore()
-            return
-        if e.key() == Qt.Key.Key_Space and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self._show_completer(force=True)
             return
         if self.auto_indent and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not e.modifiers():
             line = self.textCursor().block().text()
