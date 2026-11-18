@@ -54,6 +54,7 @@ class GuiHost(tools.Host):
         self.ctx, self.win = ctx, win
         self._invoker = _Invoker()
         self.turn_parts: set[str] = set()       # partes alteradas na resposta atual do assistente
+        self.tasks = []
 
     def character(self):
         return self.ctx.char

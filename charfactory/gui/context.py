@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -37,7 +38,10 @@ class Settings(dict):
         return s
 
     def save(self) -> None:
-        config_path().write_text(json.dumps(self, indent=1, ensure_ascii=False), "utf-8")
+        path = config_path()
+        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        temp.write_text(json.dumps(self, indent=1, ensure_ascii=False), "utf-8")
+        temp.replace(path)
 
     def add_recent(self, path: str) -> None:
         r = [p for p in self.get("recent", []) if p.lower() != path.lower()]

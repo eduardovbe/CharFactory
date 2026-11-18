@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Recovery: detect newer automatic backups, preview and recover selected files into the editor, including unapplied text and shared common states. Snapshots publish atomically and keep two generations; explicitly discarded changes stay dismissed.
+- Pending changes panel (Ctrl+Shift+D): compare live text and binary files with disk and revert an individual file while preserving changes in other files.
 - Restore open characters, the active editor, code cursors and selected animation frames on startup (configurable in Options). Missing projects are skipped; opening a file explicitly takes precedence.
 - Navigation history across editors and open characters with Alt+Left / Alt+Right.
 - Find resource usages with Shift+F12: sprites, animations, states and sounds, using unsaved editor text. Results link to the source; calculated expressions are marked as possible usages, and ZSS results open the source statedef.

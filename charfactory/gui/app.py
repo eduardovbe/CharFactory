@@ -231,6 +231,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ctx = ctx
         self.workspace = Workspace(self)
+        self._recovery_checked = set()
         ctx.characterChanging.connect(self.workspace.before_character)
         self.restart_requested = False    # trocar o idioma reabre o app ao fechar
         Section.store = ctx.settings      # seções recolhidas dos painéis são lembradas
@@ -348,6 +349,10 @@ class MainWindow(QMainWindow):
         ul.addWidget(self.usages_results)
         self.bottom.addTab(usages, icon("find"), tr("Resource usages"))
         self.usages_tab = self.bottom.indexOf(usages)
+        from .changes import ChangesPanel
+        self.changes_panel = ChangesPanel(self)
+        self.bottom.addTab(self.changes_panel, icon("edit"), tr("Pending changes"))
+        self.changes_tab = self.bottom.indexOf(self.changes_panel)
         # contadores das abas: só entram na aba quando há contagem (escondidos, ainda reservavam
         # ~25 px em cada aba) e vêm numa caixa com respiro para não passar do sublinhado
         self.badges = []
@@ -454,7 +459,9 @@ class MainWindow(QMainWindow):
         ctx.characterChanged.connect(self.on_character)
         ctx.projectsChanged.connect(self.fill_project_tabs)
         ctx.settingsChanged.connect(self.apply_settings)
-        ctx.modelChanged.connect(lambda _: QTimer.singleShot(0, self.update_title))
+        self._title_timer = QTimer(self, singleShot=True, interval=0)
+        self._title_timer.timeout.connect(self.update_title)
+        ctx.modelChanged.connect(lambda _: self._title_timer.start())
         ctx.themeChanged.connect(self.apply_theme)
         ctx.request_code.connect(self.goto_code)
         ctx.request_tool.connect(self.run_tool)
@@ -520,6 +527,7 @@ class MainWindow(QMainWindow):
         self.act(m, tr("Load backup…"), self.load_backup, None, "backup_load")
         self.act(m, tr("Create backup"), self.create_backup, "Ctrl+B", "backup_new")
         self.act(m, tr("Compare with a backup…"), self.compare_backup)
+        self.act(m, tr("Recover automatic backup…"), lambda: self.check_recovery(self.ctx.char, force=True))
         self.act(m, tr("Pack as .zip…"), self.pack_zip, None, "pack")
         m.addSeparator()
         self.act(m, tr("Exit"), self.close, "Ctrl+Q")
@@ -537,6 +545,7 @@ class MainWindow(QMainWindow):
         self.back_action.setEnabled(False)
         self.forward_action.setEnabled(False)
         self.usages_action = self.act(e, tr("Find resource usages…"), self.find_usages, "Shift+F12", "find")
+        self.act(e, tr("Pending changes…"), self.show_changes, "Ctrl+Shift+D", "edit")
         e.addSeparator()
         self.act(e, tr("Find…"), self.find_text, "Ctrl+F", "find")
         self.act(e, tr("Replace…"), lambda: self.find_text(replace=True), "Ctrl+H", "replace")
@@ -1174,6 +1183,8 @@ class MainWindow(QMainWindow):
         c = self.ctx.char
         if not c or not self.confirm_discard():
             return False
+        from .changes import RecoveryStore
+        RecoveryStore(c).dismiss()
         self.ctx.close(c)
         if not self.ctx.char:
             for p in self.code_pages:
@@ -1283,12 +1294,14 @@ class MainWindow(QMainWindow):
         self.watch_files()
         self.ctx.status.emit(tr("{0} opened").format(c.name))
         self.workspace.after_character()
+        QTimer.singleShot(0, lambda c=c: self.check_recovery(c))
 
     def update_title(self) -> None:
         c = self.ctx.char
         dirty = self.is_dirty()
         self.setWindowTitle(f"{'● ' if dirty else ''}{c.name + ' — ' if c else ''}{APP_NAME}")
         self.fill_project_tabs()
+        self.changes_panel.schedule()
 
     # ------------------------------------------------------------ explorador do projeto
 
@@ -2208,29 +2221,132 @@ class MainWindow(QMainWindow):
     def autosave(self) -> None:
         """Grava as partes alteradas (e o texto não aplicado) em _backups/autosave, sem mexer
         nos arquivos do projeto."""
+        from .changes import RecoveryStore, editor_buffers, pending
         n = 0
         for c in self.ctx.projects:
-            texts = []
-            if c is self.ctx.char:
-                texts = [(f["path"], f["edit"].toPlainText()) for p in self.code_pages for f in p.files
-                         if f["edit"].document().isModified()]
-            if not c.dirty and not texts:
-                continue
-            dest = c.dir / "_backups" / "autosave"
             try:
-                c.save_to(dest)
-                for path, text in texts:
-                    try:
-                        rel = Path(path).resolve().relative_to(c.dir)
-                    except ValueError:
-                        continue
-                    (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-                    (dest / rel).write_text(text, "utf-8")
+                changes = pending(c, editor_buffers(self) if c is self.ctx.char else ())
+                if not changes:
+                    RecoveryStore(c).dismiss()
+                    continue
+                RecoveryStore(c).write(changes)
+                paths = self.ctx.settings.get("recovery_projects", [])
+                self.ctx.settings["recovery_projects"] = [str(c.def_path), *[p for p in paths if p != str(c.def_path)]][:30]
                 n += 1
             except Exception as e:  # noqa: BLE001
                 self.ctx.status.emit(tr("Automatic backup failed ({0}): {1}").format(c.name, e))
         if n:
+            self.workspace.save_session()
+            self.ctx.settings.save()
             self.ctx.status.emit(tr("Automatic backup of {0} project(s) in _backups/autosave").format(n))
+
+    def show_changes(self):
+        self.show_bottom(self.changes_tab)
+        self._size_changes_panel()
+        self.changes_panel.tabs.setCurrentIndex(0)
+        self.changes_panel.refresh()
+
+    def show_changes_task(self, token):
+        self.show_bottom(self.changes_tab)
+        self._size_changes_panel()
+        panel = self.changes_panel
+        panel.tabs.setCurrentIndex(1)
+        panel.refresh_tasks()
+        for i in range(panel.tasks.count()):
+            if panel.tasks.item(i).data(Qt.ItemDataRole.UserRole) == token:
+                panel.tasks.setCurrentRow(i)
+                break
+
+    def _size_changes_panel(self):
+        sizes = self.main_split.sizes()
+        target = min(320, sum(sizes) // 2)
+        if len(sizes) == 2 and sizes[1] < target:
+            self.main_split.setSizes([sum(sizes) - target, target])
+
+    def revert_pending_file(self, change):
+        from .changes import FileChange, decode, editor_buffers, pending, replace_model_file
+        c = self.ctx.char
+        try:
+            if not any(ch.path == change.path and ch.part == change.part for ch in pending(c, editor_buffers(self))):
+                return
+            data = change.path.read_bytes()
+            replace_model_file(self.ctx, FileChange(change.path, change.part, data))
+            for page in self.code_pages:
+                for f in page.files:
+                    if f["path"].resolve() == change.path.resolve():
+                        ed = f["edit"]
+                        cursor = ed.textCursor()
+                        cursor.beginEditBlock()
+                        cursor.select(QTextCursor.SelectionType.Document)
+                        cursor.insertText(decode(data).replace("\r\n", "\n"))
+                        cursor.endEditBlock()
+                        ed.document().setModified(False)
+            remaining = pending(c, editor_buffers(self))
+            if not any(ch.part == change.part for ch in remaining):
+                c.dirty.discard(change.part)
+            self.update_title()
+            self.validate()
+        except (OSError, ValueError, ProjectError, StopIteration) as e:
+            QMessageBox.warning(self, tr("Revert selected file"), str(e))
+
+    def check_recovery(self, char, force=False):
+        from .changes import RecoveryDialog, RecoveryStore
+        from shiboken6 import isValid
+        if not isValid(self):
+            return
+        if char is None:
+            choices = [p for p in self.ctx.settings.get("recovery_projects", []) if Path(p).is_file()]
+            if force and choices:
+                path, ok = QInputDialog.getItem(self, tr("Recover automatic backup…"), tr("Project"), choices, 0, False)
+                if ok:
+                    self.open_path(path)
+                    self.check_recovery(self.ctx.char, force=True)
+            return
+        if char is not self.ctx.char or (not force and (str(char.def_path) in self._recovery_checked or self.is_dirty())):
+            return
+        self._recovery_checked.add(str(char.def_path))
+        store = RecoveryStore(char)
+        changes = store.candidates()
+        if not changes:
+            if force:
+                self.flash(tr("No newer automatic backup is available."))
+            return
+        dlg = RecoveryDialog(char, changes, self)
+        if dlg.exec():
+            if self.recover_files(dlg.selected()):
+                store.dismiss()
+                self.show_changes()
+        elif dlg.discarded:
+            store.dismiss()
+
+    def recover_files(self, changes):
+        from .changes import FileChange, decode, replace_model_file
+        try:
+            for change in sorted(changes, key=lambda c: c.part != "def"):
+                if not change.buffer:
+                    replace_model_file(self.ctx, change)
+                elif change.model_data is not None:
+                    replace_model_file(self.ctx, FileChange(change.path, change.part, change.model_data))
+            for change in changes:
+                if not change.buffer:
+                    continue
+                found = False
+                for page in self.code_pages:
+                    if not page.files:
+                        page.load()
+                    for f in page.files:
+                        if f["path"].resolve() == change.path:
+                            f["edit"].setPlainText(decode(change.data).replace("\r\n", "\n"))
+                            f["edit"].document().setModified(True)
+                            found = True
+                if not found:
+                    raise ProjectError(tr("The recovered file is no longer referenced by the project: {0}").format(change.path))
+            self.update_title()
+            self.validate()
+            return True
+        except (OSError, ValueError, ProjectError, StopIteration) as e:
+            QMessageBox.warning(self, tr("Recover automatic backup…"), str(e))
+            return False
 
     # ------------------------------------------------------------ ferramentas novas
 
@@ -2309,6 +2425,9 @@ class MainWindow(QMainWindow):
         if active in self.ctx.projects:
             self.ctx.activate(active)
         self.workspace.save_session()
+        from .changes import RecoveryStore
+        for c in self.ctx.projects:
+            RecoveryStore(c).dismiss()
         self.ctx.settings["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
         self.ctx.settings.save()
         self.mcp.stop()

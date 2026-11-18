@@ -508,6 +508,9 @@ class CodePage(QWidget):
             ed.cursorPositionChanged.connect(self.emit_cursor)
             ed.cursorPositionChanged.connect(self._sync_timer.start)
             ed.document().contentsChanged.connect(self._tree_timer.start)
+            changes = getattr(self.window(), "changes_panel", None)
+            if changes is not None:
+                ed.document().contentsChanged.connect(changes.schedule)
             ed.definitionRequested.connect(self.ctx.request_definition)
             workspace = getattr(self.window(), "workspace", None)
             if workspace is not None:
