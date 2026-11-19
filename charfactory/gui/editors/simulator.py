@@ -682,6 +682,10 @@ class SimulatorPage(QWidget):
         self.chain.setPlaceholderText(tr("e.g. 200 210 1000"))
         self.chain.setToolTip(tr("Move chain (combo): each state comes in as soon as it can — cancels if it touched and there is a cancel, links when P1 can act again. Empty = only the state"))
         self.chain.returnPressed.connect(self.run)
+        self.start_vars = QLineEdit()
+        self.start_vars.setPlaceholderText(tr("e.g. var(2)=150 power=1000"))
+        self.start_vars.setToolTip(tr("Values P1 starts with (var, fvar, sysvar, sysfvar, power), to test a mode of the character such as a custom combo. Empty = all zero"))
+        self.start_vars.returnPressed.connect(self.run)
         self.compare = QComboBox()
         self.compare.setToolTip(tr("Also simulates another version of the character (the one saved on disk or a backup) and shows both side by side, tick by tick"))
         self.compare.activated.connect(lambda _: self._param_changed())
@@ -746,6 +750,7 @@ class SimulatorPage(QWidget):
         self.events.itemClicked.connect(self.on_event)
         setup = Section(tr("Simulation"), "sim.setup")
         setup.add(form_row(tr("State"), self.state, self.reload_states), form_row(tr("Chain"), self.chain),
+                  form_row(tr("Variables"), self.start_vars),
                   form_row("P2", self.p2_mode), form_row(tr("Distance"), self.dist), run)
         advanced = Section(tr("Advanced"), "sim.advanced", collapsed=True)
         advanced.add(form_row(tr("Max ticks"), self.max_ticks), form_row(tr("Compare"), self.compare))
@@ -957,7 +962,7 @@ class SimulatorPage(QWidget):
             return
         chars = dict(self._prefs().get("chars") or {})
         chars.pop(str(c.def_path), None)
-        chars[str(c.def_path)] = {"state": state, "chain": self.chain.text()}
+        chars[str(c.def_path)] = {"state": state, "chain": self.chain.text(), "vars": self.start_vars.text()}
         self.ctx.settings["simulator"] = {**self._prefs(), "chars": dict(list(chars.items())[-30:])}
         self._save_soon()
 
@@ -1163,6 +1168,7 @@ class SimulatorPage(QWidget):
         if self.state.findData(last.get("state")) >= 0:       # o último golpe testado neste personagem
             self.state.setCurrentIndex(self.state.findData(last["state"]))
         self.chain.setText(last.get("chain", ""))
+        self.start_vars.setText(last.get("vars", ""))
         self.info.setText(tr("Pick a state and click Simulate."))
         # sem simulação a linha do tempo fica desligada (antes parecia pronta para arrastar)
         self.slider.setEnabled(False)
@@ -1254,6 +1260,7 @@ class SimulatorPage(QWidget):
         self._remember_move(n)
         from ...tools import simulate
         dist, mx = self.dist.value(), self.max_ticks.value()
+        svars = simulate.parse_start_vars(self.start_vars.text())
         _, pose, guard = P2_MODES[max(0, self.p2_mode.currentIndex())]
         other = self.compare.currentData()
         mugen = self.ctx.settings.get("mugen_dir") or None
@@ -1269,17 +1276,19 @@ class SimulatorPage(QWidget):
             # a auditoria dos efeitos vem depois, num trabalho à parte: o primeiro tick aparece
             # sem esperar a medida sprite a sprite das faíscas
             sim = simulate.simulate(c, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
-                                    chain=chain, from_ground=simulate.starts_on_ground(c, n))
+                                    chain=chain, from_ground=simulate.starts_on_ground(c, n),
+                                    start_vars=svars)
             # o mesmo golpe com o P2 no outro modo (defendendo ou não) roda depois, num trabalho à
             # parte (on_done): o primeiro tick não espera e um erro lá não derruba esta simulação
-            sim.other_args = None if chain or pose == "air" else (c, n, dist, mx, pose, not guard)
+            sim.other_args = None if chain or pose == "air" else (c, n, dist, mx, pose, not guard, svars)
             box = simulate.preview_window(sim) if sim.track else None
             simb = None
             if other:                   # A/B: a outra versão com a mesma simulação e a mesma câmera
                 from ... import project
                 cb = project.load(other, mugen)
                 simb = simulate.simulate(cb, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
-                                         chain=chain, from_ground=simulate.starts_on_ground(cb, n))
+                                         chain=chain, from_ground=simulate.starts_on_ground(cb, n),
+                                         start_vars=svars)
                 if simb.track and box:
                     bb = simulate.preview_window(simb)
                     box = (min(box[0], bb[0]), max(box[1], bb[1]), min(box[2], bb[2]), max(box[3], bb[3]))
@@ -1388,9 +1397,9 @@ class SimulatorPage(QWidget):
         args = getattr(sim, "other_args", None)
         if args:                    # acerto e defesa lado a lado (issue #4), sem atrasar o 1º tick
             def other(args=args):
-                c, n, dist, mx, pose, guard = args
+                c, n, dist, mx, pose, guard, svars = args
                 o = simulate.simulate(c, n, p2_dist=dist, max_ticks=mx, p2_pose=pose, p2_guard=guard,
-                                      from_ground=simulate.starts_on_ground(c, n))
+                                      from_ground=simulate.starts_on_ground(c, n), start_vars=svars)
                 return gen, simulate.frame_data(o)
             job = Job(other)
             job.signals.done.connect(self._other_mode_done)

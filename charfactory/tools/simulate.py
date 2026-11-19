@@ -748,7 +748,7 @@ class Sim:
     def __init__(self, char, state: int, p2_dist: float = 50.0, seed: int = 7,
                  max_ticks: int = 900, commands: tuple = (), p2_clsn: list | None = None,
                  p2_pose: str = "stand", p2_guard: bool = False, chain: tuple = (),
-                 from_ground: bool = False):
+                 from_ground: bool = False, start_vars: dict | None = None):
         self.char = char
         self.p2_clsn = p2_clsn                    # Clsn2 do P2 (oponente real); sem = boneco do tamanho do char
         self.defs = char.all_statedefs()
@@ -805,6 +805,7 @@ class Sim:
         self.xmin = self.cam_x - self.cam_half + self.screen_lr
         self.xmax = self.cam_x + self.cam_half - self.screen_lr
         self.track: list[dict] = []
+        set_start_vars(self.p1, start_vars)      # modo do char (ex.: Var(2) = 150) antes do 1º estado
         self.enter(self.p1, state, first=True)
         self.p1.started = False
         # golpe aéreo: começa no alto do pulo, caindo; from_ground = sai do chão (pulo com ataque)
@@ -2902,14 +2903,45 @@ class Sim:
 
 def simulate(char, state: int, p2_dist: float = 50.0, seed: int = 7, max_ticks: int = 900,
              commands: tuple = (), p2_clsn: list | None = None, p2_pose: str = "stand",
-             p2_guard: bool = False, chain: tuple = (), from_ground: bool = False) -> Sim:
+             p2_guard: bool = False, chain: tuple = (), from_ground: bool = False,
+             start_vars: dict | None = None) -> Sim:
     """Roda o estado `state` (e os que ele chama) até voltar ao parado. p2_clsn: as Clsn2 do
     oponente (ex.: `opponent_clsn(kfm)`); sem elas o P2 é um boneco do tamanho do char.
     p2_pose ("stand", "crouch", "air") e p2_guard dizem como o P2 espera o golpe; chain é uma
     cadeia de estados (o 1º é `state`) que entram em seguida, para testar combos. from_ground:
-    um estado aéreo que começa no chão (o pulo faz parte do golpe), em vez de no alto do pulo."""
+    um estado aéreo que começa no chão (o pulo faz parte do golpe), em vez de no alto do pulo.
+    start_vars: valores do P1 no início (`parse_start_vars`), para testar modos do char."""
     return Sim(char, state, p2_dist, seed, max_ticks, commands, p2_clsn, p2_pose, p2_guard,
-               chain, from_ground).run()
+               chain, from_ground, start_vars).run()
+
+
+_START_VAR_RE = re.compile(r"(?i)\b(sysfvar|sysvar|fvar|var)\s*\(\s*(\d+)\s*\)\s*:?=\s*(-?[\d.]+)"
+                           r"|\b(power)\s*:?=\s*(-?\d+)")
+
+
+def parse_start_vars(text: str) -> dict:
+    """`var(2)=150, fvar(1)=0.5 power=1000` -> {("var", 2): 150, ("fvar", 1): 0.5, ("power", 0): 1000}.
+    O que não for reconhecido fica de fora."""
+    out = {}
+    for m in _START_VAR_RE.finditer(text or ""):
+        if m.group(4):
+            out[("power", 0)] = int(m.group(5))
+            continue
+        kind, idx, val = m.group(1).lower(), int(m.group(2)), m.group(3)
+        try:
+            out[(kind, idx)] = float(val) if "f" in kind else int(float(val))
+        except ValueError:
+            continue
+    return out
+
+
+def set_start_vars(ent, values: dict | None) -> None:
+    """Põe no P1 os valores de `parse_start_vars`."""
+    for (kind, idx), v in (values or {}).items():
+        if kind == "power":
+            ent.power = int(v)
+        else:
+            ent.set_var(kind, idx, v)
 
 
 def starts_on_ground(char, state: int) -> bool:

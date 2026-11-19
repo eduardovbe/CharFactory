@@ -2295,5 +2295,7 @@
  "Interpolate from the previous frame (MUGEN 1.1)": "Interpolar desde el frame anterior (MUGEN 1.1)",
  "Preview tick within the current frame (, and . step one tick)": "Ver un tick dentro del frame actual (, y . avanzan un tick)",
  "the command of state {0} gives state {1} here": "el comando del estado {0} saca el estado {1} aquí",
- " (* only under a condition: Var, Power, helper…)": " (* solo con una condición: Var, Power, helper…)"
+ " (* only under a condition: Var, Power, helper…)": " (* solo con una condición: Var, Power, helper…)",
+ "e.g. var(2)=150 power=1000": "p. ej. var(2)=150 power=1000",
+ "Values P1 starts with (var, fvar, sysvar, sysfvar, power), to test a mode of the character such as a custom combo. Empty = all zero": "Valores con los que empieza el P1 (var, fvar, sysvar, sysfvar, power), para probar un modo del personaje, como un custom combo. Vacío = todo en cero"
 }

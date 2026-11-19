@@ -2295,5 +2295,7 @@
  "Interpolate from the previous frame (MUGEN 1.1)": "从上一帧插值 (MUGEN 1.1)",
  "Preview tick within the current frame (, and . step one tick)": "预览当前帧内的某个 tick(, 和 . 逐 tick 移动)",
  "the command of state {0} gives state {1} here": "状态 {0} 的指令在此处会触发状态 {1}",
- " (* only under a condition: Var, Power, helper…)": "（* 仅在满足条件时：Var、Power、helper…）"
+ " (* only under a condition: Var, Power, helper…)": "（* 仅在满足条件时：Var、Power、helper…）",
+ "e.g. var(2)=150 power=1000": "例如 var(2)=150 power=1000",
+ "Values P1 starts with (var, fvar, sysvar, sysfvar, power), to test a mode of the character such as a custom combo. Empty = all zero": "P1 的初始值（var、fvar、sysvar、sysfvar、power），用于测试角色的某种模式，例如自定义连招。留空 = 全部为零"
 }

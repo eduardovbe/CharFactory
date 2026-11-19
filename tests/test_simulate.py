@@ -364,6 +364,15 @@ def test_chain_follows_the_cmd_triggers_and_recovery_frees_juggle(tmp_path):
     assert [s["how"] for s in r["steps"]] == ["liga"] and r["steps"][0]["t"] > 10
     assert r["hits"] == 2 and r["combo"] == 1                 # o P2 se recuperou: pega, sem combo
     assert not any("juggle" in n for n in sim.unsupported)
+    # com o modo ligado (Var(2) > 0, como o Excel do Garuda) o golpe cancela no contato; com
+    # airjuggle = 0 o Ikemen 1.0 não deixa o 2º acertar enquanto o P2 é alvo (sem pontos); o
+    # HitDef segue ativo e só pega depois que o P2 sai do acerto: não é combo
+    assert simulate.parse_start_vars("var(2)=150 power=1000") == {("var", 2): 150, ("power", 0): 1000}
+    sim = simulate.simulate(c, 9970, p2_dist=30, chain=(9970, 9971),
+                            start_vars=simulate.parse_start_vars("var(2)=150"))
+    r = simulate.chain_report(sim)
+    assert [s["how"] for s in r["steps"]] == ["cancela"] and r["steps"][0]["t"] < 5
+    assert r["hits"] == 2 and r["combo"] == 1 and any("juggle" in n for n in sim.unsupported)
     # o frame data não diz que cancela sempre: o cancelamento pede Var(2) e fica marcado
     assert simulate.cancel_targets(c, 9970) == {"acerto": set(), "defesa": set()}
     assert simulate.cancel_targets(c, 9970, conditional=True)["acerto"] == {9971}
