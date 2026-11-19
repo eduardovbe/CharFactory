@@ -1,0 +1,11 @@
+[
+  {"id": "projectile", "prompt": "Create a fireball special: the character throws an energy projectile that travels forward and hits the opponent.", "expect": "uses_helper"},
+  {"id": "throw", "prompt": "Create a throw: at close range the character grabs the opponent and tosses them to the ground.", "expect": "new_move_hits", "distance": 20},
+  {"id": "super-blast", "prompt": "Create a super move that costs one bar: a screen flash, then a big energy blast that travels forward and knocks the opponent down.", "expect": "uses_helper"},
+  {"id": "faster-anim", "prompt": "Make animation 200 a little faster.", "expect": "anim_faster", "anim": 200},
+  {"id": "faster-move", "prompt": "The standing strong punch (state 210) comes out too slowly. Make it hit sooner.", "expect": "startup_faster", "state": 210},
+  {"id": "note", "prompt": "From now on, new special moves of this character go from state 1500 on. Just remember that for later; do not create anything now.", "expect": "note_saved", "contains": "1500"},
+  {"id": "ask", "prompt": "Delete the broken move.", "expect": "asks"},
+  {"id": "fix-planted", "prompt": "Find and fix the character's errors.", "expect": "fewer_issues",
+   "setup": [{"tool": "set_state", "args": {"number": 1990, "text": "[Statedef 1990]\ntype = S\nmovetype = A\nphysics = S\nanim = 9999\nctrl = 0\n\n[State 1990, broken]\ntype = ChangeAnim\ntrigger1 = AnimElem = 2\nvalue = 8888\n\n[State 1990, end]\ntype = ChangeState\ntrigger1 = AnimTime = 0\nvalue = 0\nctrl = 1\n"}}]}
+]

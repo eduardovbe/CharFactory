@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- AI assistant: answers appear as they are written (Claude and OpenAI).
+- AI assistant: token count and estimated cost of the conversation.
+- AI assistant: suggestions based on the open character.
+- AI assistant: reasoning level and a smaller tool set for local models in AI settings.
+- AI assistant: Continue button when an answer runs out of steps.
+- AI assistant: names the animations by looking at them.
+- AI assistant: reviews a finished move frame by frame (`review_move`).
+- AI assistant: builds projectiles, throws, supers and moves in phases from a spec (`build_spec_move`).
+- AI assistant: knows the character from the start (`character_brief`).
+- AI assistant: notes per character and the last conversation can be reopened.
+- AI assistant: rate answers and save them as test cases.
+- `tools/ai_eval.py` to measure the assistant, with recorded runs that replay offline and a Claude Code (MCP) mode.
+
+### Changed
+
+- AI assistant: old tool results are trimmed in long conversations.
+- AI assistant: strong models get goals instead of a step-by-step recipe.
+- Long tool results come in parts instead of being cut.
+
 ## [0.5.5] - 2026-11-18
 
 ### Added

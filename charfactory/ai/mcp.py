@@ -31,12 +31,14 @@ INSTRUCTIONS = (
     "Char Factory is an editor for M.U.G.E.N and Ikemen GO fighting game characters. These tools read "
     "and change the character that is open: states (CNS), commands (CMD), animations and collision "
     "boxes (AIR), constants, sprites and sounds, and run moves in a tick-by-tick simulator for frame "
-    "data. Start with character_info. Changes stay in memory (and can be undone in the editor) until "
+    "data. Start with character_brief (moves, animations with names, free numbers, hit style and the "
+    "user's notes about the character). Changes stay in memory (and can be undone in the editor) until "
     "save_project writes them to disk; only save when the user asks. After editing states or "
     "animations by hand, run validate_character, and simulate_state to check a move. " +
     "To bring images in as sprites, call inspect_images and then import_sprites (indexed images keep "
     "their embedded palette with mode embedded; big HD images need a scale). run_in_engine opens the "
-    "real engine with a run profile, only when the user asks to play or test in the engine. " + tools.MOVE_RECIPE)
+    "real engine with a run profile, only when the user asks to play or test in the engine. When the "
+    "user states a lasting decision about the character, save it with save_note. " + tools.MOVE_GOALS)
 
 
 def new_token() -> str:
@@ -180,13 +182,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200)
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """Cliente que fecha a conexão no meio (o agente terminou) não é erro: nada no console."""
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
 class HttpServer:
     """Servidor HTTP do MCP numa thread própria. `host.call` precisa ser seguro para chamar de
     outra thread (o da janela leva a chamada para a thread da interface)."""
 
     def __init__(self, host: tools.Host, token: str, port: int = DEFAULT_PORT, bind: str = "127.0.0.1"):
-        self.httpd = ThreadingHTTPServer((bind, port), _Handler)
-        self.httpd.daemon_threads = True
+        self.httpd = _Server((bind, port), _Handler)
         self.httpd.host, self.httpd.token, self.httpd.session = host, token, secrets.token_hex(16)
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}/mcp"

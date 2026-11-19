@@ -1,0 +1,9 @@
+[
+  {"id": "explain", "prompt": "Explain what the character's first normal attack does.", "expect": "no_writes"},
+  {"id": "fix-errors", "prompt": "Find and fix the character's errors.", "expect": "fewer_errors"},
+  {"id": "crouch-kick", "prompt": "Create a new crouching kick.", "expect": "new_move_hits"},
+  {"id": "dash-punch", "prompt": "Create a special move: a dash punch, on a motion input that no other move of the character uses.", "expect": "new_move_hits"},
+  {"id": "launcher-combo", "prompt": "Create a move that launches the opponent with an uppercut and follows with a jumping kick that hits them in the air.", "expect": "new_move_hits"},
+  {"id": "super", "prompt": "Create a super move that costs one power bar: a fast rush of three punches ending in a knockdown.", "expect": "new_move_hits"},
+  {"id": "life", "prompt": "Set the character's life to 1200.", "expect": "constant", "section": "Data", "key": "life", "value": "1200"}
+]

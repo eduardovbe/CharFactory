@@ -10,18 +10,22 @@ As descrições ficam em inglês: são lidas pelo modelo, não pelo usuário.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
+import secrets
+import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from .. import project, validate
 from ..tools import combo, ops
+from . import memory
 
 MAX_IMAGE_SIDE = 1568          # acima disso os provedores reduzem a imagem de qualquer jeito
-MAX_TEXT = 60_000              # resposta de ferramenta maior que isso é cortada (contexto do modelo)
+MAX_TEXT = 30_000              # resposta de ferramenta maior que isso vem em partes (more_output)
 
 # o caminho para um golpe novo, nas instruções do MCP e do assistente. Curto e direto: modelos
 # rápidos seguem cada passo ao pé da letra, e explorar demais (ler golpes, olhar dezenas de
@@ -35,13 +39,13 @@ MOVE_RECIPE = (
     "`search` on a big character) and pick each pose by its name; only when the names do not say "
     "enough, look at the few candidates in ONE view_animations call. 3) Call build_move. 4) Read its "
     "verdict: if a step MISSES, follow its hint and call build_move again with the same state; as "
-    "soon as every hit connects, stop and answer. For a new move do not read the character's other "
+    "soon as every hit connects, call review_move once on its first state, fix what it points out, "
+    "and answer. For a new move do not read the character's other "
     "states or animations, and do not run simulate_state or validate_character after build_move "
     "(its answer has both). Only for what build_move cannot do (projectiles, throws, helpers, custom "
-    "effects) write states by hand, the way the character's other moves do (mugen_guide topic "
-    "'style': helpers instead of the Projectile controller, the character's own sparks and sounds): "
-    "create_move gives a starting point, set_state(replace=true) the rest, mugen_guide explains "
-    "each part and simulate_state checks it; never tell the user a move "
+    "effects, supers with a flash, moves in phases) use build_spec_move: you describe the move as a "
+    "spec and it writes the CNS; write states by hand only for a mechanic the spec cannot describe, "
+    "the way the character's other moves do (mugen_guide topic 'style'); never tell the user a move "
     "works while the simulation says it misses. To change a move: one made by build_move (its "
     "statedef has a '; build_move:' comment) is changed by calling build_move again with the same "
     "state; for others, get_move shows the statedef, animations, input and verdict in one call, "
@@ -49,6 +53,26 @@ MOVE_RECIPE = (
     "state and animation numbers: never overwrite another move unless the user asks to change that "
     "one. The game only sees saved files: tell the user to save before testing in MUGEN, and if "
     "they say the game still behaves the old way, check unsaved_changes in character_info first.")
+
+# a mesma tarefa para modelos fortes: o objetivo e o que é "pronto", sem o passo a passo (modelos
+# fortes rendem menos quando cada passo vem ditado) e sem as proibições de explorar
+MOVE_GOALS = (
+    "Moves: build_move writes any attack, from one hit to a long combo (statedefs, [Command] and "
+    "[Statedef -1] entry), and tunes its physics in the simulator; pick its poses by name from "
+    "list_animations, or by looking at the candidates with view_animations. A move is done when "
+    "build_move says every hit connects, review_move finds nothing left to fix in the frame sheet and "
+    "the frame data, and validate_character shows no new errors. For what build_move cannot do "
+    "(projectiles, beams, throws, supers with a flash, rushes, moves in phases), use build_spec_move: "
+    "describe the move as a spec and the compiler writes correct CNS in the character's style. Write "
+    "CNS by hand (set_state, edit_state) only for a mechanic no spec field describes, the way the "
+    "character's own moves do (mugen_guide topic 'style'), and check it with simulate_state and "
+    "review_move. A move made by build_move or build_spec_move (its statedef has a '; build_move:' or "
+    "'; spec:' comment) is changed by calling that tool again with the same state; others with "
+    "get_move, edit_state and edit_animation. New moves take free state and animation numbers: never "
+    "overwrite another move unless the user asks to change that one. Never tell the user a move works "
+    "while the simulation says it misses. The game only sees saved files: tell the user to save "
+    "before testing in MUGEN, and if they say the game still behaves the old way, check "
+    "unsaved_changes in character_info first.")
 
 
 class ToolError(Exception):
@@ -126,6 +150,16 @@ class Host:
 
     def __init__(self, char: project.Character | None = None):
         self.char = char
+        # respostas cortadas, inteiras, por identificação: o painel e os clientes MCP usam o mesmo
+        # host, e cada um lê o resto da sua com more_output
+        self.cuts: dict[str, str] = {}
+
+    def keep_cut(self, text: str) -> str:
+        cid = secrets.token_hex(3)
+        self.cuts[cid] = text
+        while len(self.cuts) > 8:
+            self.cuts.pop(next(iter(self.cuts)))
+        return cid
 
     def character(self) -> project.Character | None:
         return self.char
@@ -176,12 +210,34 @@ def run(host: Host, name: str, args: dict | None) -> Result:
         return out
     text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, separators=(",", ":"), default=str)
     if len(text) > MAX_TEXT:
-        text = text[:MAX_TEXT] + f"\n… (cut: {len(text) - MAX_TEXT} more characters; ask for less, e.g. one group)"
+        text = _page(text, 0, host.keep_cut(text))
     return Result(text)
+
+
+def _page(text: str, offset: int, cut: str) -> str:
+    part = text[offset:offset + MAX_TEXT]
+    end = offset + len(part)
+    if end >= len(text):
+        return part
+    return part + (f"\n… (cut: characters {offset}-{end} of {len(text)}. Usually it is better to ask for less "
+                   f"(a range, a search, one group); if you need the rest, call more_output with "
+                   f"cut=\"{cut}\" and offset={end})")
 
 
 def describe() -> list[Tool]:
     return list(REGISTRY.values())
+
+
+@tool("Read on in a tool answer that was cut short; its last line gives the cut and the offset.",
+      {"cut": _str("The cut id from the note"), "offset": _int("Character offset from the note")},
+      ("cut", "offset"), needs_char=False)
+def more_output(host, cut: str, offset: int):
+    text = host.cuts.get(cut)
+    if text is None:
+        raise ToolError(f"no cut answer '{cut}' (only the last few are kept): call the tool again")
+    if not 0 <= offset < len(text):
+        raise ToolError(f"offset out of range: the cut answer has {len(text)} characters")
+    return Result(_page(text, offset, cut))
 
 
 @tool("Begin a named editing task in the GUI. Its consecutive changes across tools can be undone together. "
@@ -214,6 +270,68 @@ def character_info(host, char):
     s = char.summary()
     s["unsaved_changes"] = sorted(char.dirty)
     return s
+
+
+BRIEF_MAX = 9000
+
+
+def brief(char) -> str:
+    """O que um assistente precisa saber do personagem antes de mexer nele, num texto só: golpes e
+    comandos, animações com nome, números livres, o estilo dos acertos e as notas do usuário."""
+    lines = [f'character "{char.name}" ({Path(char.def_path).name}), localcoord {char.info("localcoord", "320,240")}']
+    entries = _entries_by_state(char)
+    moves = [f"{n} {entries[n][0]}" for n in sorted(entries) if n >= 0]
+    lines.append("moves (state <- [Statedef -1] entry and input): " + ("; ".join(moves[:90]) or "none"))
+    try:
+        lines.append(f"free numbers: specials from {_free_block(char, 1000, 3)}, supers from "
+                     f"{_free_block(char, 3000, 3)}, animations from {_free_number(char, 1000)}")
+    except (AttributeError, KeyError):
+        pass
+    named, unnamed = [], []
+    for n in char.anims.numbers():
+        name = _anim_name(char, n)
+        (named if name else unnamed).append(f"{n} {name}" if name else str(n))
+    anims = "animations: " + ("; ".join(named) or "none named")
+    if unnamed:
+        anims += f". Without a name ({len(unnamed)}): " + ", ".join(unnamed[:80]) + (" …" if len(unnamed) > 80 else "")
+    lines.append(anims if len(anims) < 5000 else anims[:5000] + " … (list_animations for the rest)")
+    try:
+        h = combo.house(char)
+        style = (f"hit style of its moves: hitsound light {h.hitsound['light']}, heavy {h.hitsound['heavy']}; "
+                 f"guardsound {h.guardsound}; sparkno light {h.sparkno['light']}, heavy {h.sparkno['heavy']}; "
+                 f"guard.sparkno {h.guard_sparkno}")
+        if h.spark:
+            style += f"; its own hit spark is made by a {h.spark[0]} on MoveHit"
+        lines.append(style)
+    except Exception:  # noqa: BLE001  (o estilo é um extra do resumo)
+        pass
+    notes = memory.notes(char.def_path)
+    lines.append("the user's notes about this character: " + (
+        " ".join(f"({i}) {n}" for i, n in enumerate(notes, 1)) if notes else "none yet"))
+    text = "\n".join(lines)
+    return text if len(text) <= BRIEF_MAX else text[:BRIEF_MAX] + " …"
+
+
+@tool("Summary of the open character in one call: its moves with their inputs, animations with "
+      "names, free state and animation numbers, the hit style of its moves (sounds, sparks) and the "
+      "user's notes about it. Read it before working on a character.")
+def character_brief(host, char):
+    return brief(char)
+
+
+@tool("Save a lasting decision or preference of the user about this character (numbering, damage, "
+      "style, what to avoid), in one short sentence. Notes come with the character summary at the "
+      "start of every conversation. Save only what the user decided or asked to keep, not progress.",
+      {"text": _str("The note, in the user's language")}, ("text",), writes=True)
+def save_note(host, char, text: str):
+    return {"notes": {i: n for i, n in enumerate(memory.add_note(char.def_path, text), 1)}}
+
+
+@tool("Delete one of the user's notes about this character (the number from the summary), when the "
+      "user changes their mind or asks to forget it.", {"number": _int("Note number")}, ("number",),
+      writes=True)
+def remove_note(host, char, number: int):
+    return {"notes": {i: n for i, n in enumerate(memory.remove_note(char.def_path, int(number)), 1)}}
 
 
 @tool("Check the character for errors and warnings (missing animations, sprites, sounds, bad "
@@ -324,11 +442,14 @@ def _anim_users(char) -> dict[int, list[int]]:
 
 
 def _anim_name(char, number: int) -> str:
+    """Nome no .air (comentário), o padrão do motor ou o visto nas imagens (animindex)."""
     try:
         name = char.anims.name_of(number)
     except (StopIteration, KeyError, AttributeError):
         name = ""
-    return name or STANDARD_ACTIONS.get(number, "")
+    if name or number in STANDARD_ACTIONS:
+        return name or STANDARD_ACTIONS[number]
+    return memory.label_of(char, number)
 
 
 def _free_number(char, start: int) -> int:
@@ -1004,6 +1125,210 @@ def build_move(host, char, steps: list, command: str, kind: str = "special", sta
     return out
 
 
+# ======================================================================= golpe por especificação
+
+SPEC_MARK = "; spec: "                 # a especificação do golpe, numa linha, no 1º estado dele
+_SPEC_KINDS = {"normal", "special", "super", "air", "air_special", "throw"}
+_SPEC_START = {"normal": 1000, "special": 1000, "throw": 800, "air": 1000, "air_special": 1000, "super": 3000}
+
+
+def spec_moves(char) -> dict[int, dict]:
+    """Golpes feitos por build_spec_move: {1º estado: especificação} (lida do comentário)."""
+    out = {}
+    for n, (sd, _) in char.all_statedefs(include_common=False).items():
+        m = re.search(r"^; spec: (\{.*\})\s*$", sd.section.text(), re.M)
+        if m:
+            try:
+                out[n] = json.loads(m[1])
+            except ValueError:
+                pass
+    return out
+
+
+def _spec_states(move: dict, base: int) -> list[int]:
+    return [base] + [int(p.get("state", base + k)) for k, p in enumerate(move.get("phases") or [], 1)]
+
+
+def _spec_check(char, move: dict) -> None:
+    """Erros que o compilador não pega e que dariam golpe quebrado, ditos de um jeito que o
+    modelo sabe corrigir."""
+    names = {p.get("name") for p in move.get("phases") or [] if p.get("name")}
+    for where, st in [("the move", move)] + [(f"phase '{p.get('name', k)}'", p)
+                                              for k, p in enumerate(move.get("phases") or [], 1)]:
+        if "anim" not in st and "frames" not in st and where != "the move":
+            raise ToolError(f"{where} needs anim (an action of the character) or frames")
+        if "anim" in st and "frames" not in st and char.anims.get(int(st["anim"])) is None:
+            raise ToolError(f"{where}: animation {st['anim']} does not exist (list_animations shows them)")
+        for h in st.get("hit") or []:
+            if not h.get("elem") and not h.get("elems") and "frames" not in st:
+                anim = int(st.get("anim", move.get("anim", -1)))
+                act = char.anims.get(anim)
+                if act is None or not any(f.clsn1 for f in act.frames):
+                    raise ToolError(f"{where}: animation {anim} has no attack box (Clsn1), so its hit would "
+                                    "never connect: give frames with \"hit\" on the attack frames, or pick "
+                                    "an animation that has red boxes")
+        for key in ("next", "on_hit"):
+            ref = st.get(key)
+            ref = ref.get("phase") if isinstance(ref, dict) else ref
+            if isinstance(ref, str) and not ref.lstrip("-").isdigit() and ref not in names | {"inicio"}:
+                raise ToolError(f"{where}: {key} = '{ref}' is not the name of a phase ({sorted(names)})")
+        for h in st.get("helpers") or []:
+            if isinstance(h.get("phase"), str) and h["phase"] not in names:
+                raise ToolError(f"{where}: helper phase '{h['phase']}' does not exist ({sorted(names)})")
+
+
+def _spec_anims(move: dict, base: int) -> list[int]:
+    """As animações que o compilador escreve para o golpe (as dadas por frames)."""
+    sts = [(move, base)] + [(p, n) for p, n in zip(move.get("phases") or [], _spec_states(move, base)[1:])]
+    return [int(st.get("anim", n)) for st, n in sts if "frames" in st]
+
+
+def _spec_built(char, move: dict, base: int) -> dict:
+    """Impressão do que o compilador deixou em cada estado e animação do golpe, para saber
+    depois se alguém mexeu à mão (a linha da especificação não conta)."""
+    def digest(text):
+        text = re.sub(r"(?m)^; spec: .*\n?", "", text)
+        return hashlib.sha1(" ".join(text.split()).encode()).hexdigest()[:10]
+    out = {}
+    for n in _spec_states(move, base):
+        if n in char.all_statedefs(include_common=False):
+            out[f"s{n}"] = digest(ops.get_statedef_text(char, n))
+    for n in _spec_anims(move, base):
+        if char.anims.get(n) is not None:
+            out[f"a{n}"] = digest(ops.get_action_text(char, n))
+    return out
+
+
+def _spec_defaults(char) -> dict:
+    """Os sons e faíscas dos golpes do próprio char, e a altura dele para as caixas automáticas."""
+    h = combo.house(char)
+    d = {"hitsound": h.hitsound["heavy"], "guardsound": h.guardsound, "sparkno": h.sparkno["heavy"],
+         "guard_sparkno": h.guard_sparkno, "clsn1_height": combo.stand_height(char)}
+    if h.spark:
+        kv = {k.lower(): v for k, v in h.spark[1]}
+        if h.spark[0].lower() == "explod" and kv.get("anim"):
+            d["spark_explod"] = {"anim": kv["anim"], **({"scale": [s.strip() for s in kv["scale"].split(",")][:2]}
+                                                        if kv.get("scale") else {})}
+        elif kv.get("stateno"):
+            d["spark_explod"] = {"helper": kv["stateno"]}
+    return d
+
+
+@tool("Build a move from a spec, without writing CNS: the compiler writes the animation (with "
+      "automatic boxes), every statedef, helpers, effects, sounds, super pause, [Command] and the "
+      "[Statedef -1] entry, with the character's own hit sounds and sparks, then simulates and validates. "
+      "Use it for what build_move does not cover: projectiles and beams, throws, supers with a flash, "
+      "rushes, moves in phases. Move fields: state (first state; default a free block), name, kind "
+      "(normal, special, super, air, air_special, throw: unblockable, only grabs a close opponent on "
+      "the ground and not in hitstun; range in px, default 15), command ('~D, DF, F, x'), power (1000 a bar), "
+      "anim (an existing action) or frames ([[group, item, ticks, \"hit\"?], ...]: a new animation; "
+      "\"hit\" marks attack frames), velset [x, y], hit [{elem?, damage [hit, guard], animtype "
+      "(Light, Medium, Hard, Back, Up, DiagUp), pausetime [p1, p2] ([0, 10] in a helper), "
+      "ground_velocity [x, y], air_velocity [x, y], fall (knockdown), guardflag, extra {any HitDef "
+      "parameter: value}}], vfx [{anim, elem, pos [x, y], scale [x, y], postype}], sounds [{elem, value "
+      "'S1,0'}], vel [{elem, x, y}], superpause {time, darken, bgfade (stage darkens), flash {anim}}, "
+      "cancel ['command:state'], bind_target [{elem, pos [x, y], time}] (hold the opponent in a throw), "
+      "phases [{name, anim or frames, hit, vfx, sounds, velset, next (phase name), on_hit (phase name: "
+      "go there when it hits), helper (true: the state of a helper, e.g. a projectile; it moves by its "
+      "velset and is removed at the end of its animation; give it frames with \"hit\" on every frame, or "
+      "it only hits on the one frame with a red box; a hit frame with no sprite, group -1, gets a "
+      "round box, for an invisible blast), helpers [{phase, elem, pos [x, y]}] (fire "
+      "that helper phase)}]; phases take the states after `state` in order. extra (raw controllers) is "
+      "a last resort. Projectile: {\"kind\": \"special\", \"command\": \"~D, DF, F, x\", \"anim\": "
+      "1000, \"helpers\": [{\"phase\": \"ball\", \"elem\": 3, \"pos\": [40, -50]}], \"phases\": "
+      "[{\"name\": \"ball\", \"helper\": true, \"anim\": 1005, \"velset\": [5, 0], \"hit\": "
+      "[{\"damage\": [60, 10], \"pausetime\": [0, 10]}]}]}. The spec stays in the move: call again "
+      "with the same state to change it, and change the move through the spec, not by hand (a new "
+      "build undoes hand edits). Then call review_move.",
+      {"move": {"type": "object", "description": "The move spec (fields above)"},
+       "replace_input": _bool("The input belongs to another move and the user wants this one there "
+                              "instead: removes that move's [Statedef -1] entry (its state stays)"),
+       "discard_hand_edits": _bool("States or animations of this move were changed by hand after it "
+                                   "was built and the new spec should replace those changes")},
+      ("move",), writes=True)
+def build_spec_move(host, char, move: dict, replace_input: bool = False, discard_hand_edits: bool = False):
+    from ..tools import movespec
+    if not isinstance(move, dict):
+        raise ToolError("move must be an object with the fields in the description")
+    m = json.loads(json.dumps(move))                    # cópia: o modelo pode mandar o mesmo de novo
+    kind = m.setdefault("kind", "special")
+    if kind not in _SPEC_KINDS:
+        raise ToolError(f"kind must be one of {sorted(_SPEC_KINDS)}")
+    if "anim" not in m and "frames" not in m:
+        raise ToolError("the move needs anim (an action of the character) or frames")
+    count = 1 + len(m.get("phases") or [])
+    specs = spec_moves(char)
+    if m.get("state") is None:
+        m["state"] = _free_block(char, _SPEC_START[kind], count)
+    base = int(m["state"])
+    mine = set(_spec_states(specs[base], base)) if base in specs else set()
+    defs = char.all_statedefs()                         # com os comuns: 0, 5000… são do motor
+    for n in _spec_states(m, base):
+        if n < 200 or 5000 <= n < 6000:
+            raise ToolError(f"state {n} is reserved for the engine's common states: leave state out, or "
+                            f"use a free block such as {_free_block(char, _SPEC_START[kind], count)}")
+        if n in defs and n not in mine:
+            raise ToolError(f"state {n} belongs to another move: leave state out, or use a free block "
+                            f"such as {_free_block(char, base, count)}")
+    _spec_check(char, m)
+    if -1 not in char.all_statedefs():
+        raise ToolError("the character has no [Statedef -1] to put the command in")
+    pose = "air" if kind.startswith("air") else "stand"
+    taken = None
+    if m.get("command"):
+        _check_input(char, m["command"], pose, replace_input, own=(base,))
+        taken = _take_input(char, m["command"], pose, own=(base,))
+        m.setdefault("command_name", f"spec_{base}")
+        same = char.commands.find(m["command_name"])
+        if same and same[0].sequence.replace(" ", "") != m["command"].replace(" ", ""):
+            m["command_name"] = f"spec_{base}_{len(char.commands.commands())}"
+    if base in specs and not discard_hand_edits:
+        built = specs[base].get("_built") or {}
+        now = _spec_built(char, specs[base], base)
+        edited = sorted(k for k in built if now.get(k) != built[k])
+        if edited:
+            names = ", ".join(("state " if k[0] == "s" else "animation ") + k[1:] for k in edited)
+            raise ToolError(f"{names} of this move changed by hand after build_spec_move, and a new build "
+                            "would undo that. Put the change in the spec (hit extra, frames with their "
+                            "own boxes, extra controllers) and call again with discard_hand_edits=true, "
+                            "or keep editing by hand")
+    # os outros golpes por especificação são recompilados junto (a entrada no -1 é de todos):
+    # o que eles têm agora, à mão ou não, volta depois
+    own = char.all_statedefs(include_common=False)
+    others = {n: ops.get_statedef_text(char, n) for b, sp in specs.items() if b != base
+              for n in _spec_states(sp, b) if n in own}
+    other_anims = [ops.get_action_text(char, n) for b, sp in specs.items() if b != base
+                   for n in _spec_anims(sp, b) if char.anims.get(n) is not None]
+    for n in mine - set(_spec_states(m, base)):             # fase que saiu do golpe
+        ops.remove_statedef(char, n)
+    m.pop("_built", None)
+    specs[base] = m
+    try:
+        made = movespec.build_moves(char, [{k: v for k, v in sp.items() if k != "_built"}
+                                           for sp in specs.values()], _spec_defaults(char))
+    except (ValueError, KeyError, TypeError, IndexError) as e:
+        raise ToolError(f"the spec is not valid: {e}") from None
+    for n, text in others.items():
+        ops.set_statedef_text(char, n, text)
+    for text in other_anims:
+        ops.set_action_text(char, text)
+    head, _, rest = ops.get_statedef_text(char, base).partition("\n")   # a especificação fica no 1º estado
+    rest = re.sub(r"(?m)^; spec: .*\n?", "", rest)
+    m["_built"] = _spec_built(char, m, base)
+    ops.set_statedef_text(char, base, f"{head}\n{SPEC_MARK}{json.dumps(m, separators=(',', ':'))}\n{rest}")
+    states = _spec_states(m, base)
+    out = {"states": states, "animations": [a for a in made["anims"]], "command": m.get("command_name"),
+           "sequence": m.get("command"), "simulation": _verdict(char, base)}
+    if taken:
+        out["input_taken_from"] = f"[State -1, {taken}] (entry removed; its state is still there)"
+    errs = [i for i in validate.report(validate.validate_character(char))["issues"]
+            if any(i["where"].startswith((f"[State {s},", f"[Statedef {s}]")) for s in states)]
+    if errs:
+        out["problems"] = errs[:10]
+    out["next"] = "call review_move on the first state and fix what it shows by calling build_spec_move again"
+    return out
+
+
 # ======================================================================= animações
 
 @tool("List the animations (actions of the .air), one line each, with what each one is: its name "
@@ -1557,6 +1882,15 @@ def mugen_reference(host, name: str):
 
 # ======================================================================= simulação
 
+_THROW = re.compile(r"(?im)^\s*attr\s*=\s*[^,\n]*,\s*[NSH]T\b")
+
+
+def _reach(char, number: int) -> float:
+    """Distância do boneco no simulador: 50 px, ou 20 num agarrão (só pega colado)."""
+    sd = char.all_statedefs().get(number)
+    return 20.0 if sd and _THROW.search(sd[0].text()) else 50.0
+
+
 def _verdict(char, number: int) -> dict | None:
     """Simulação rápida de um estado de ataque, para a resposta de quem acabou de escrevê-lo: o
     modelo vê na hora se o golpe acerta, quantas vezes e de que lado, sem precisar pedir."""
@@ -1564,10 +1898,12 @@ def _verdict(char, number: int) -> dict | None:
     sd = char.all_statedefs().get(number)
     if number < 0 or not sd or not hasattr(sd[0], "params"):
         return None
-    if (sd[0].params().get("movetype") or "").strip().upper()[:1] != "A":
+    if not _is_attack(sd[0]):
         return None
+    dist = _reach(char, number)
     try:
-        sim = simulate.simulate(char, number, max_ticks=600, from_ground=simulate.starts_on_ground(char, number))
+        sim = simulate.simulate(char, number, p2_dist=dist, max_ticks=600,
+                                from_ground=simulate.starts_on_ground(char, number))
     except Exception:  # noqa: BLE001  (o veredito é um extra: estado quebrado aparece no validate)
         return None
     fd = simulate.frame_data(sim)
@@ -1577,10 +1913,10 @@ def _verdict(char, number: int) -> dict | None:
         fh = path.get("first_hit", {})
         side = f" from {fh['from']}" if fh else ""
         air = " in the air" if fh.get("in_air") else ""
-        text = (f"hits {len(hits)} time(s) on an opponent 50 px away; first hit at tick {hits[0]['t']}"
+        text = (f"hits {len(hits)} time(s) on an opponent {dist:g} px away; first hit at tick {hits[0]['t']}"
                 f"{side}{air}")
     else:
-        text = ("MISSES: no hit on an opponent standing 50 px away. Check the Clsn1 frames, when the "
+        text = (f"MISSES: no hit on an opponent standing {dist:g} px away. Check the Clsn1 frames, when the "
                 "HitDef is on, and where the character is when it attacks (simulate_state path)")
     out = {"verdict": text, "startup": fd["startup"], "total": fd["total"]}
     if "crossed_opponent_at_tick" in path:
@@ -1627,7 +1963,108 @@ def _path(sim) -> dict:
 
 
 _OUTCOME = {"acerto": "hit", "defesa": "guarded", "errou": "whiff"}
+_KINDS = {"normal": (200, 999), "special": (1000, 2999), "super": (3000, 4999)}
+REVIEW = [
+    "each pose reads as the action asked for (a kick shows the leg striking, a launcher rises, a "
+    "super has a clear startup pose)",
+    "the attack box (red) is on the limb that hits, on the most extended pose of the swing",
+    "no frame jumps out of place (size, offset or facing) and the feet stay planted on ground moves",
+    "there is anticipation before the hit and a follow-through after it, not a pose that just appears",
+    "sparks and effects sit on the contact point and match the weight of the hit; the finisher is bigger",
+]
+
+
+def _kind_of(number: int) -> str | None:
+    return next((k for k, (lo, hi) in _KINDS.items() if lo <= number <= hi), None)
+
+
+def _median(values: list) -> float | None:
+    v = [x for x in values if isinstance(x, (int, float))]
+    return statistics.median(v) if v else None
+
+
+def _is_attack(sd) -> bool:
+    return (sd.params().get("movetype") or "").strip().upper()[:1] == "A"
+
+
+# frame data dos golpes já simulados para comparação: (char, estado, texto do statedef) -> dados
+_PEER_CACHE: dict[tuple, dict | None] = {}
 _EVENTS = {"estado": "state", "acerto": "hit", "defesa": "guard", "pausa": "pause"}
+
+
+def _peers(char, number: int, kind: str, limit: int = 6) -> list[dict]:
+    """Frame data dos golpes do próprio char do mesmo tipo (as entradas do [Statedef -1])."""
+    from ..tools import simulate
+    lo, hi = _KINDS[kind]
+    own = char.all_statedefs(include_common=False)
+    out = []
+    for n in sorted(_entries_by_state(char)):
+        if not lo <= n <= hi or n == number or n not in own:
+            continue
+        sd = own[n][0]
+        if not _is_attack(sd):
+            continue
+        text = sd.text()
+        if combo.MARK in text and abs(n - number) < 20:           # parte do mesmo golpe gerado
+            continue
+        key = (str(char.def_path), n, text)
+        if key not in _PEER_CACHE:                # só muda quando o golpe muda: não simula de novo
+            if len(_PEER_CACHE) > 500:
+                _PEER_CACHE.clear()
+            try:
+                fd = simulate.frame_data(simulate.simulate(char, n, p2_dist=50.0, max_ticks=600,
+                                                           from_ground=simulate.starts_on_ground(char, n)))
+                _PEER_CACHE[key] = {"state": n, "startup": fd["startup"], "recovery": fd["recovery"],
+                                    "total": fd["total"]}
+            except Exception:  # noqa: BLE001  (golpe que o simulador não roda não entra na comparação)
+                _PEER_CACHE[key] = None
+        if _PEER_CACHE[key] is None:
+            continue
+        out.append(_PEER_CACHE[key])
+        if len(out) >= limit:
+            break
+    return out
+
+
+@tool("Review a finished move the way a fighting game designer would: a sheet with one picture per "
+      "frame of the move in the simulator (attack boxes in red), its frame data next to the "
+      "character's own moves of the same kind, the problems the simulator measured and a short "
+      "checklist to judge the sheet. Call it once when a move connects, fix what it shows (poses, "
+      "timing, offsets and boxes with edit_animation, or build_move again), and only call it again "
+      "after a real change.", {"number": _int("First state of the move, e.g. 1000")}, ("number",))
+def review_move(host, char, number: int):
+    from ..tools import simulate
+    if number not in char.all_statedefs():
+        raise ToolError(f"statedef {number} does not exist")
+    dist = _reach(char, number)
+    sim = simulate.simulate(char, number, p2_dist=dist, max_ticks=900,
+                            from_ground=simulate.starts_on_ground(char, number))
+    fd = simulate.frame_data(sim)
+    issues = []
+    outcome = _OUTCOME.get(fd["outcome"], fd["outcome"])
+    if outcome != "hit":
+        issues.append(f"it does not hit a standing opponent {dist:g} px away ({outcome})")
+    kind = _kind_of(number)
+    peers = _peers(char, number, kind) if kind else []
+    compare = {"kind": kind, "moves_compared": [p["state"] for p in peers]}
+    if peers:
+        med_s, med_r = _median([p["startup"] for p in peers]), _median([p["recovery"] for p in peers])
+        compare.update(median_startup=med_s, median_recovery=med_r)
+        if med_s is not None and isinstance(fd["startup"], (int, float)) and fd["startup"] > med_s * 1.6 + 3:
+            issues.append(f"startup of {fd['startup']} ticks is slow next to the character's other {kind}s "
+                          f"(median {med_s:g}): shorten the frames before the hit")
+        if med_r is not None and isinstance(fd["recovery"], (int, float)) and fd["recovery"] > med_r * 2 + 4:
+            issues.append(f"recovery of {fd['recovery']} ticks is long next to its other {kind}s "
+                          f"(median {med_r:g}): shorten the last frames")
+    issues += [p.get("message") or str(p) for p in simulate.audit(sim)[:20]]
+    out = {"state": number,
+           "frame_data": {"startup": fd["startup"], "active": fd["active"], "recovery": fd["recovery"],
+                          "total": fd["total"], "outcome": outcome, "advantage": fd["advantage"]},
+           "compared_with_the_character": compare,
+           "measured_issues": issues or ["none"],
+           "look_at_the_sheet_for": REVIEW}
+    return Result(json.dumps(out, ensure_ascii=False, separators=(",", ":"), default=str),
+                  [_png(simulate.sheet(sim, per_frame=True))])
 
 
 @tool("Run a state tick by tick in the built-in simulator against a standing opponent, without "

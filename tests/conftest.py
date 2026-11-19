@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -47,3 +48,17 @@ def dispose_window(win) -> None:
     win.close()
     win.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+class Script:
+    """Substitui providers._request: devolve as respostas na ordem e guarda os pedidos."""
+
+    def __init__(self, *replies):
+        self.replies, self.requests = list(replies), []
+        self.bodies = []                      # só os corpos (cópias), na ordem
+
+    def __call__(self, url, headers, body=None, method=None, stream=None):
+        copy = json.loads(json.dumps(body))
+        self.requests.append((url, headers, copy))
+        self.bodies.append(copy)
+        return self.replies.pop(0)

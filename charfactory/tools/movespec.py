@@ -164,6 +164,9 @@ def build_anim(char: Character, move: dict, colors=None, clsn1_height: float | N
             c1 = clsn1_auto(char, g, i, colors) if ("hit" in flags and g >= 0) else []
             if c1 and clsn1_height:
                 c1 = grow_clsn1(c1, clsn1_height, move.get("kind", "normal"))
+            elif not c1 and "hit" in flags and move.get("helper"):
+                r = round((clsn1_height or 100) * 0.2)       # projétil sem sprite: caixa redonda
+                c1 = [(-r, -r, r, r)]
         for n, boxes in ((2, c2), (1, c1)):
             if boxes:
                 lines.append(f"Clsn{n}: {len(boxes)}")
@@ -359,7 +362,10 @@ def build_state(char: Character, move: dict, d: dict) -> str:
                                  {"normal": "NA", "air": "NA", "special": "SA",
                                   "air_special": "SA", "super": "HA", "throw": "NT"}[kind]),
                       animtype=h.get("animtype", "Medium"), damage=_pair(h.get("damage", [20, 4])),
-                      guardflag=h.get("guardflag", "MA"),   # MA: defende em pé, agachado e no ar
+                      # MA: defende em pé, agachado e no ar; agarrão não se defende
+                      guardflag=h.get("guardflag", None if kind == "throw" else "MA"),
+                      hitflag=h.get("hitflag", "M-" if kind == "throw" else None),   # M-: não pega em hitstun
+                      priority=h.get("priority", "1, Miss" if kind == "throw" else None),
                       pausetime=_pair(h.get("pausetime", [8, 9])),
                       hitsound=h.get("hitsound", d.get("hitsound", "S5,0")),
                       guardsound=h.get("guardsound", d.get("guardsound", "S6,0")),
@@ -497,6 +503,8 @@ def _minus1(moves: list[dict], d: dict) -> str:
             cond.append(f"power >= {abs(int(m['power']))}")
         if m.get("condition"):
             cond.append(m["condition"])
+        elif kind == "throw":                   # agarrão: oponente colado, no chão e fora de hitstun
+            cond += [f"p2bodydist x < {m.get('range', 15)}", "p2statetype != A", "p2movetype != H"]
         ai = m.get("ai")
         kv = dict(triggerall=[f"({c})" for c in cond], trigger1=f'(!ailevel) && (command = "{cname}")')
         if ai:

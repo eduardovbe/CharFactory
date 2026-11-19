@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -23,7 +24,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTextBrowser, QToolButton,
                                QVBoxLayout, QWidget)
 
-from ..ai import keys, mcp, providers, tools
+from .. import validate
+from ..ai import animindex, keys, mcp, memory, providers, tools
 from ..ai.agent import Agent
 from ..i18n import tr
 from .icons import icon
@@ -142,18 +144,30 @@ class GuiHost(tools.Host):
         source = "assistant" if worker and threading.current_thread() is worker.thread else "external"
         if threading.current_thread() is threading.main_thread():
             return self._call(name, args, source)
+        try:
+            return self.on_ui(lambda: self._call(name, args, source))
+        except Exception as e:  # noqa: BLE001  (a thread que chamou recebe o erro como resultado)
+            return tools.Result(f"{type(e).__name__}: {e}", is_error=True)
+
+    def on_ui(self, fn):
+        """Roda fn na thread da interface (de qualquer thread) e devolve o resultado ou o erro."""
+        if threading.current_thread() is threading.main_thread():
+            return fn()
         box: list = []
         done = threading.Event()
 
         def job():
             try:
-                box.append(self._call(name, args, source))
+                box.append((True, fn()))
             except Exception as e:  # noqa: BLE001  (a thread que espera não pode ficar presa)
-                box.append(tools.Result(f"{type(e).__name__}: {e}", is_error=True))
+                box.append((False, e))
             done.set()
         self._invoker.request.emit(job)
         done.wait()
-        return box[0]
+        ok, value = box[0]
+        if not ok:
+            raise value
+        return value
 
     def _call(self, name: str, args: dict | None, source="external") -> tools.Result:
         t = tools.REGISTRY.get(name)
@@ -321,17 +335,72 @@ class McpService:
 def provider_from_settings(settings) -> providers.Provider:
     name = settings.get("ai_provider") or "anthropic"
     return providers.make(name, keys.get(name), settings.get(f"ai_model_{name}") or "",
-                          settings.get(f"ai_base_{name}") or "")
+                          settings.get(f"ai_base_{name}") or "", settings.get("ai_effort") or "")
+
+
+def index_provider(settings) -> providers.Provider:
+    """Provedor para nomear animações: o mesmo da conversa, com um modelo barato com visão."""
+    name = settings.get("ai_provider") or "anthropic"
+    model = (settings.get(f"ai_index_model_{name}") or animindex.CHEAP.get(name)
+             or settings.get(f"ai_model_{name}") or "")
+    return providers.make(name, keys.get(name), model, settings.get(f"ai_base_{name}") or "", "low")
+
+
+def lean_tools(settings, name: str) -> bool:
+    """Conjunto enxuto de ferramentas: ligado por padrão só nos modelos locais."""
+    v = settings.get(f"ai_lean_{name}")
+    return name == "compatible" if v is None else bool(v)
+
+
+def _tokens(n: int) -> str:
+    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
 PROVIDER_SHORT = {"anthropic": "Claude", "openai": "OpenAI", "gemini": "Gemini", "compatible": "Local"}
 INTERNAL = -1          # status de um erro do próprio app (não do provedor)
 
 
-class _Worker(QObject):
-    """Conversa numa thread daemon (não um QThread): fechar a janela no meio de uma resposta
-    não espera a rede nem derruba o app ao sair. Os sinais chegam na thread da interface.
-    Sem texto, continua a conversa de onde parou (Tentar de novo depois de um erro)."""
+class _ThreadWorker(QObject):
+    """Trabalho numa thread daemon (não um QThread): fechar a janela no meio não espera a rede
+    nem derruba o app ao sair. Os sinais chegam na thread da interface."""
+    NAME = "charfactory-worker"
+
+    def __init__(self):
+        super().__init__()
+        self.thread = threading.Thread(target=self.run, name=self.NAME, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self.thread.is_alive()
+
+    def run(self):
+        raise NotImplementedError
+
+
+class _IndexWorker(_ThreadWorker):
+    """Nomeia animações: `render` desenha cada folha (na thread da interface), uma por vez."""
+    NAME = "charfactory-animindex"
+    progress = Signal(int, int)
+    done = Signal(object)
+
+    def __init__(self, def_path, batches, provider, render):
+        super().__init__()
+        self.def_path, self.batches, self.provider, self.render = def_path, batches, provider, render
+
+    def run(self):
+        try:
+            out = animindex.label(self.def_path, self.batches, self.provider, self.render, self.progress.emit)
+        except Exception as e:  # noqa: BLE001
+            out = animindex.Outcome(errors=[f"{type(e).__name__}: {e}"])
+        self.done.emit(out)
+
+
+class _Worker(_ThreadWorker):
+    """A conversa com o provedor. Sem texto, continua de onde parou (Tentar de novo depois de
+    um erro)."""
+    NAME = "charfactory-assistant"
     event = Signal(str, object)
     finished_ok = Signal()
     failed = Signal(str, object)           # mensagem, status HTTP (None: rede; INTERNAL: do app)
@@ -339,13 +408,6 @@ class _Worker(QObject):
     def __init__(self, agent: Agent, text: str | None):
         super().__init__()
         self.agent, self.text = agent, text
-        self.thread = threading.Thread(target=self.run, name="charfactory-assistant", daemon=True)
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def isRunning(self) -> bool:  # noqa: N802
-        return self.thread.is_alive()
 
     def run(self):
         emit = lambda kind, data: self.event.emit(kind, data)  # noqa: E731
@@ -388,6 +450,8 @@ def _step_label(name: str, args: dict) -> str:
         "test_command": lambda: tr("Tested the input {0}").format(a.get("input") or a.get("command") or ""),
         "create_move": lambda: tr("Created move {0}").format(n),
         "build_move": lambda: tr("Built a move in {0} steps").format(len(a.get("steps") or [])),
+        "build_spec_move": lambda: tr("Built move {0}").format(
+            (a.get("move") or {}).get("name") or (a.get("move") or {}).get("state") or ""),
         "list_animations": lambda: tr("Listed the animations"),
         "view_animations": lambda: tr("Looked at animations {0}").format(", ".join(map(str, a.get("numbers", [])[:8]))),
         "get_animation": lambda: tr("Read animation {0}").format(n),
@@ -411,6 +475,11 @@ def _step_label(name: str, args: dict) -> str:
             a.get("slot", 1), Path(str(a.get("path", ""))).name),
         "list_run_profiles": lambda: tr("Read the run profiles"),
         "run_in_engine": lambda: tr("Ran the character in the engine ({0})").format(a.get("profile") or tr("active profile")),
+        "more_output": lambda: tr("Read more of the last result"),
+        "character_brief": lambda: tr("Read the character summary"),
+        "review_move": lambda: tr("Reviewed move {0}").format(n),
+        "save_note": lambda: tr("Saved a note: {0}").format(str(a.get("text", ""))[:60]),
+        "remove_note": lambda: tr("Deleted note {0}").format(n),
     }
     try:
         return labels[name]()
@@ -431,8 +500,6 @@ def _friendly_error(msg: str, status) -> str:
         return tr("The provider is overloaded or failing right now. Try again in a moment.")
     if status == INTERNAL:
         return tr("Something went wrong in Char Factory while running the assistant.")
-    if msg.startswith("stopped after"):
-        return tr("The assistant used every step it has for one answer. Ask it to continue, or split the request.")
     if status is None and "empty response" not in msg and "no answer from the model" not in msg:
         return tr("Could not reach the provider. Check the internet connection, or that the local "
                   "server (Ollama, LM Studio) is running.")
@@ -466,10 +533,47 @@ class AssistantPanel(QWidget):
     A conversa fica guardada como itens (mensagem, passo, imagem, erro) e é desenhada a partir
     deles: trocar o tema redesenha tudo com as cores novas."""
 
-    @staticmethod
-    def suggestions() -> tuple[str, ...]:
-        return (tr("Explain what the move I am looking at does"), tr("Find and fix the character's errors"),
-                tr("Create a new crouching kick"), tr("Make this animation a little faster"))
+    def index_suggestion(self) -> str:
+        """Atalho para nomear as animações, quando o char tem várias sem nome (vazio se não)."""
+        c = self.ctx.char
+        try:
+            n = len(animindex.unnamed(c)) if c is not None else 0
+        except Exception:  # noqa: BLE001
+            n = 0
+        return tr("Name the {0} animations that have no name").format(n) if n >= 5 else ""
+
+    def suggestions(self) -> tuple[str, ...]:
+        return tuple(text for text, _ in self._suggestion_items())
+
+    def _suggestion_items(self) -> list[tuple[str, object]]:
+        """Até quatro (texto, ação) para começar: primeiro o que o personagem aberto pede
+        (animações sem nome, erros no validador, nenhum especial ou super, sem IA), depois os de
+        sempre. Ação None manda o texto ao assistente."""
+        out, errors = [], 0
+        c = self.ctx.char
+        index = self.index_suggestion()
+        if index:
+            out.append((index, self.index_animations))
+        if c is not None:
+            try:
+                errors = sum(i.severity == "error" for i in validate.validate_character(c))
+                own = c.all_statedefs(include_common=False)
+                ai = -1 in own and "ailevel" in own[-1][0].text().lower()
+            except Exception:  # noqa: BLE001  (sugestão é um extra: nunca derruba o painel)
+                own, ai = {}, True
+            if errors:
+                out.append((tr("Fix the {0} errors the validator found").format(errors), None))
+            if not any(1000 <= n < 3000 for n in own):
+                out.append((tr("Create a first special move"), None))
+            elif not any(3000 <= n < 5000 for n in own):
+                out.append((tr("Create a super move"), None))
+            if not ai:
+                out.append((tr("Add an AI so the character fights on its own"), None))
+        for s in (tr("Explain what the move I am looking at does"), tr("Find and fix the character's errors"),
+                  tr("Create a new crouching kick"), tr("Make this animation a little faster")):
+            if len(out) < 4 and not (errors and s == tr("Find and fix the character's errors")):
+                out.append((s, None))
+        return out[:4]
 
     def __init__(self, ctx, host: GuiHost, win):
         super().__init__()
@@ -481,6 +585,11 @@ class AssistantPanel(QWidget):
         self._images: dict[str, QImage] = {}
         self._last_text = ""
         self._busy_text, self._dots = "", 0
+        self._live, self._live_pos = "", None     # texto chegando aos poucos (streaming)
+        self._sugg_dirty = True                   # refazer as sugestões na próxima vez
+        self._turns: list[dict] = []              # cada resposta: pedido, resposta e ferramentas
+        self._turn_start = 0
+        self.indexer: _IndexWorker | None = None
         self.setObjectName("sidePanel")
         self.setMinimumWidth(320)
 
@@ -488,11 +597,24 @@ class AssistantPanel(QWidget):
         head.setContentsMargins(12, 8, 6, 4)
         title = QLabel(tr("Assistant"))
         title.setObjectName("panelTitle")
+        self.usage_label = QLabel()
+        self.usage_label.setObjectName("dim")
+        self.usage_label.hide()
         self.model_btn = QToolButton()
         self.model_btn.setAutoRaise(True)
         self.model_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.model_btn.setToolTip(tr("Provider and model (AI settings)"))
         self.model_btn.clicked.connect(lambda: self.win.ai_settings())
+        self.index_btn = QToolButton()
+        self.index_btn.setAutoRaise(True)
+        self.index_btn.setIcon(icon("anims"))
+        self.index_btn.setToolTip(tr("Name the animations by looking at them (a cheap model with vision)"))
+        self.index_btn.clicked.connect(self.index_animations)
+        notes = QToolButton()
+        notes.setAutoRaise(True)
+        notes.setIcon(icon("comment"))
+        notes.setToolTip(tr("Notes the assistant keeps about this character"))
+        notes.clicked.connect(self.edit_notes)
         new = QToolButton()
         new.setAutoRaise(True)
         new.setIcon(icon("file_new"))
@@ -505,7 +627,10 @@ class AssistantPanel(QWidget):
         close.clicked.connect(lambda: self.win.toggle_assistant(False))
         head.addWidget(title)
         head.addStretch(1)
+        head.addWidget(self.usage_label)
         head.addWidget(self.model_btn)
+        head.addWidget(self.index_btn)
+        head.addWidget(notes)
         head.addWidget(new)
         head.addWidget(close)
 
@@ -525,6 +650,10 @@ class AssistantPanel(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(350)
         self._timer.timeout.connect(self._tick)
+        self._live_timer = QTimer(self)           # junta os pedaços: redesenha no máximo a cada 80 ms
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(80)
+        self._live_timer.timeout.connect(self._show_live)
 
         self.composer = QFrame()
         self.composer.setObjectName("aiComposer")
@@ -574,6 +703,8 @@ class AssistantPanel(QWidget):
         self._ctx_timer.timeout.connect(self._refresh_context)
         self._ctx_timer.start()
         ctx.themeChanged.connect(self._rerender)
+        ctx.modelChanged.connect(self._model_changed)
+        ctx.characterChanged.connect(self._model_changed)
         self.refresh()
         self._input_changed()
         self._refresh_context()
@@ -618,18 +749,46 @@ class AssistantPanel(QWidget):
         lay.addWidget(text)
         lay.addSpacing(4)
         lay.addWidget(self.setup)
+        self.resume_btn = QPushButton(icon("reload"), "")
+        self.resume_btn.setObjectName("aiChip")
+        self.resume_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.resume_btn.clicked.connect(self.resume_last)
+        self.resume_btn.hide()
+        lay.addWidget(self.resume_btn)
         try_label = QLabel(tr("Try"))
         try_label.setObjectName("hint")
         lay.addWidget(try_label)
-        for s in self.suggestions():
-            chip = QPushButton()
-            chip.setObjectName("aiChip")
-            chip.setText(s)
-            chip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            chip.clicked.connect(lambda _=False, b=chip: self._suggest(b.text()))
-            lay.addWidget(chip)
+        self.sugg_box = QVBoxLayout()
+        self.sugg_box.setContentsMargins(0, 0, 0, 0)
+        self.sugg_box.setSpacing(lay.spacing())
+        lay.addLayout(self.sugg_box)
         lay.addStretch(1)
+        self._fill_suggestions()
         return w
+
+    def _model_changed(self, _part: str = "") -> None:
+        self._sugg_dirty = True
+
+    def _fill_suggestions(self) -> None:
+        """Refaz as sugestões quando o personagem ou o que ele tem mudou."""
+        if not self._sugg_dirty:
+            return
+        self._sugg_dirty = False
+        while self.sugg_box.count():
+            w = self.sugg_box.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        for text, action in self._suggestion_items():
+            chip = QPushButton(text)
+            chip.setObjectName("aiChip")
+            chip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            chip.clicked.connect(action or (lambda _=False, t=text: self._suggest(t)))
+            self.sugg_box.addWidget(chip)
+        saved = memory.conversation_saved(self.ctx.char.def_path) if self.ctx.char is not None else None
+        if saved:
+            when = time.strftime("%d/%m %H:%M", time.localtime(saved))
+            self.resume_btn.setText(tr("Continue the last conversation ({0})").format(when))
+        self.resume_btn.setVisible(bool(saved))
 
     def _suggest(self, text: str) -> None:
         self.input.setPlainText(text)
@@ -710,8 +869,13 @@ class AssistantPanel(QWidget):
         self._items.clear()
         self._steps.clear()
         self._images.clear()
+        self._turns.clear()
+        self._live, self._live_pos = "", None
         self.view.clear()
+        self.usage_label.hide()
         self.stack.setCurrentWidget(self.welcome)
+        self._sugg_dirty = True
+        self._fill_suggestions()
         self.focus_input()
 
     # ------------------------------------------------------------ campo de texto
@@ -747,6 +911,8 @@ class AssistantPanel(QWidget):
         if not self.isVisible():
             return
         self._fill_quick()
+        if self.stack.currentWidget() is self.welcome:
+            self._fill_suggestions()
         text = tr("Sees: {0}").format(self.host.view_label())
         width = max(40, self.context_label.width())
         self.context_label.setText(self.context_label.fontMetrics().elidedText(
@@ -772,15 +938,18 @@ class AssistantPanel(QWidget):
             if self.agent is not None:
                 self._add(("note", tr("New conversation with {0}: one provider cannot read another's history.")
                            .format(p.label)))
-            self.agent = Agent(p, self.host)
+            # ferramentas fixas a conversa toda: o modo enxuto vale a partir da próxima conversa
+            self.agent = Agent(p, self.host, lean=lean_tools(self.ctx.settings, p.name), stream=True)
+            self.agent.char_path = str(self.ctx.char.def_path) if self.ctx.char is not None else ""
         else:
             self.agent.provider = p               # outra chave ou modelo: a conversa continua
         self._last_text = text
         self.input.clear()
         self._add(("user", text))
-        self._start(self.host.view_context() + "\n\n" + text)
+        self._start(self.agent.preface(self.ctx.char) + self.host.view_context() + "\n\n" + text)
 
     def _start(self, text: str | None) -> None:
+        self._turn_start = len(self._steps)
         self.host.turn_parts.clear()
         self.host.begin_task(getattr(self, "_last_text", "") or tr("AI task"), "assistant")
         self.worker = _Worker(self.agent, text)
@@ -812,7 +981,18 @@ class AssistantPanel(QWidget):
         self.busy_label.setText(self._busy_text + "." * self._dots)
 
     def on_event(self, kind: str, data) -> None:
-        if kind == "text":
+        if kind == "delta":
+            self._live += data
+            self._busy_text = tr("Writing")
+            if not self._live_timer.isActive():
+                self._live_timer.start()
+        elif kind == "usage":
+            self._show_usage(data)
+        elif kind == "limit":
+            self._drop_live()
+            self._add(("limit", data))
+        elif kind == "text":
+            self._drop_live()
             self._add(("text", data))
             self._busy_text = tr("Thinking")
         elif kind == "tool":
@@ -834,7 +1014,50 @@ class AssistantPanel(QWidget):
             self._add(("note", tr("Stopped.")))
 
     def _idle(self) -> None:
+        self._drop_live()
         self.show_busy(False)
+
+    # ------------------------------------------------------------ streaming e uso
+
+    def _show_live(self) -> None:
+        """Mostra o texto que está chegando como a última mensagem (trocada a cada redesenho)."""
+        if not self._live:
+            return
+        self.stack.setCurrentWidget(self.view)
+        sb = self.view.verticalScrollBar()
+        at_end = sb.value() >= sb.maximum() - 8
+        self._cut_live()
+        self._live_pos = self.view.document().characterCount() - 1
+        self.view.append(self._render(("text", self._live), self._colors()))
+        if at_end:
+            sb.setValue(sb.maximum())
+
+    def _cut_live(self) -> None:
+        if self._live_pos is None:
+            return
+        cur = QTextCursor(self.view.document())
+        cur.setPosition(self._live_pos)
+        cur.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cur.removeSelectedText()
+        self._live_pos = None
+
+    def _drop_live(self) -> None:
+        """A mensagem completa chegou (ou a resposta parou): sai o texto provisório."""
+        self._live_timer.stop()
+        self._cut_live()
+        self._live = ""
+
+    def _show_usage(self, u: dict) -> None:
+        total = u["input"] + u["output"] + u["cache_read"] + u["cache_write"]
+        text = tr("{0} tokens").format(_tokens(total))
+        tip = tr("Input {0} · output {1} · read from cache {2} · written to cache {3}").format(
+            *(_tokens(u[k]) for k in ("input", "output", "cache_read", "cache_write")))
+        if u.get("cost") is not None:
+            text += f" · ≈US${u['cost']:.2f}"
+            tip += "\n" + tr("The cost is estimated from the provider's list prices.")
+        self.usage_label.setText(text)
+        self.usage_label.setToolTip(tip)
+        self.usage_label.setVisible(total > 0)
 
     def on_done(self) -> None:
         self._idle()
@@ -844,6 +1067,11 @@ class AssistantPanel(QWidget):
         if self.host.turn_parts:
             names = ", ".join(PART_NAMES.get(p, p) for p in sorted(self.host.turn_parts))
             self._add(("note", tr("AI changed: {0} (Ctrl+Z undoes)").format(names)))
+        answer = next((it[1] for it in reversed(self._items) if it[0] == "text"), "")
+        self._turns.append({"prompt": self._last_text, "answer": answer, "parts": sorted(self.host.turn_parts),
+                            "tools": [c.name for c, _ in self._steps[self._turn_start:]]})
+        self._add(("rate", len(self._turns) - 1, ""))
+        self._save_conversation()
 
     def on_failed(self, msg: str, status=None) -> None:
         self._idle()
@@ -851,6 +1079,138 @@ class AssistantPanel(QWidget):
         if task:
             self._add(("task", task["id"], task["title"]))
         self._add(("error", msg, status))
+        self._save_conversation()
+
+    # ------------------------------------------------------------ memória da conversa
+
+    def _saved_items(self) -> list:
+        """Os itens da conversa sem o que não sobrevive a fechar o app (imagens, tarefas)."""
+        out = []
+        for it in self._items:
+            if it[0] == "step":
+                call, res = self._steps[it[1]]
+                first = res.text.strip().splitlines()[0][:110] if res.is_error and res.text.strip() else ""
+                out.append(["past_step", _step_label(call.name, call.args), res.is_error, first])
+            elif it[0] in ("user", "text", "note", "limit", "error", "past_step"):
+                out.append(list(it))
+        return out
+
+    def _save_conversation(self) -> None:
+        if self.agent is None or not self.agent.char_path or not self.agent.messages:
+            return
+        try:
+            memory.save_conversation(self.agent.char_path, {**self.agent.state(), "items": self._saved_items(),
+                                                            "turns": self._turns})
+        except (OSError, TypeError, ValueError) as e:
+            self.ctx.status.emit(tr("Could not save the conversation: {0}").format(e))
+
+    def resume_last(self) -> None:
+        """Reabre a última conversa deste personagem, com o mesmo provedor."""
+        if self.busy() or self.ctx.char is None:
+            return
+        data = memory.load_conversation(self.ctx.char.def_path)
+        if not data:
+            return
+        p = provider_from_settings(self.ctx.settings)
+        if p.name != data.get("provider"):
+            label = providers.PROVIDERS[data["provider"]].label if data.get("provider") in providers.PROVIDERS else "?"
+            QMessageBox.information(self, tr("Assistant"), tr(
+                "The last conversation was with {0}. Choose it in AI settings to continue it.").format(label))
+            return
+        self.new_chat()
+        self.agent = Agent.restore(data, p, self.host, stream=True)
+        self.agent.char_path = str(self.ctx.char.def_path)
+        self._turns = list(data.get("turns") or [])
+        for it in data.get("items") or []:
+            self._add(tuple(it))
+        self._add(("note", tr("Conversation reopened.")))
+        self._show_usage({**self.agent.usage, "cost": self.agent.cost})
+
+    # ------------------------------------------------------------ avaliação das respostas
+
+    def _rate(self, i: int, rating: str) -> None:
+        if not 0 <= i < len(self._turns) or self.agent is None:
+            return
+        t = self._turns[i]
+        memory.log_feedback({"rating": rating, "provider": self.agent.provider.name,
+                             "model": self.agent.provider.model, "style": self.agent.style,
+                             "char": self.agent.char_path, **t})
+        self._items = [("rate", i, rating) if it[0] == "rate" and it[1] == i else it for it in self._items]
+        self._rerender()
+
+    def _save_case(self, i: int) -> None:
+        if not 0 <= i < len(self._turns) or self.agent is None:
+            return
+        t = self._turns[i]
+        if {"build_move", "build_spec_move", "create_move"} & set(t["tools"]):
+            expect = "new_move_hits"
+        elif not t["parts"]:
+            expect = "no_writes"
+        else:
+            expect = "no_new_errors"
+        slug = re.sub(r"[^a-z0-9]+", "-", t["prompt"].lower())[:30].strip("-") or "case"
+        case = memory.add_case({"id": slug, "prompt": t["prompt"], "char": self.agent.char_path, "expect": expect})
+        self.ctx.status.emit(tr("Saved as test case {0} (tools/ai_eval.py --user-cases)").format(case["id"]))
+        self._items = [("rate", i, "saved") if it[0] == "rate" and it[1] == i and not it[2] else it
+                       for it in self._items]
+        self._rerender()
+
+    # ------------------------------------------------------------ nomes das animações e notas
+
+    def index_animations(self) -> None:
+        c = self.ctx.char
+        if c is None or (self.indexer is not None and self.indexer.isRunning()):
+            return
+        p = index_provider(self.ctx.settings)
+        if (p.needs_key and not p.api_key) or not p.model:
+            self.win.ai_settings()
+            return
+        batches = animindex.plan(c)
+        if not batches:
+            self.ctx.status.emit(tr("Every animation already has a name."))
+            return
+        # cada folha é desenhada na thread da interface só na hora de enviar: a janela não trava
+        self.indexer = _IndexWorker(c.def_path, batches, p,
+                                    lambda nums: self.host.on_ui(lambda: animindex.sheet(c, nums)))
+        self.indexer.progress.connect(self._index_progress)
+        self.indexer.done.connect(self._index_done)
+        self.index_btn.setEnabled(False)
+        self._index_progress(0, len(batches))
+        self.indexer.start()
+
+    def _index_progress(self, done: int, total: int) -> None:
+        self.ctx.status.emit(tr("Naming animations: sheet {0} of {1}").format(done, total))
+
+    def _index_done(self, out) -> None:
+        self.index_btn.setEnabled(True)
+        tokens = _tokens(sum(out.usage.values()))
+        if out.labels:
+            self.ctx.status.emit(tr("Named {0} animations ({1} tokens).").format(len(out.labels), tokens))
+        if out.errors:
+            QMessageBox.warning(self, tr("Name animations"), tr("Some sheets could not be read: {0}").format(
+                out.errors[0][:400]))
+        self._model_changed()
+        self._fill_suggestions()
+
+    def edit_notes(self) -> None:
+        c = self.ctx.char
+        if c is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("Notes about {0}").format(c.name))
+        dlg.resize(520, 360)
+        ed = QPlainTextEdit("\n".join(memory.notes(c.def_path)))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(hint_label(tr("One note per line. The assistant reads them at the start of every "
+                                    "conversation about this character, and adds notes when you tell it "
+                                    "about a decision.")))
+        lay.addWidget(ed, 1)
+        lay.addWidget(buttons)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            memory.set_notes(c.def_path, ed.toPlainText().splitlines())
 
     @staticmethod
     def _repolish(w) -> None:
@@ -910,6 +1270,27 @@ class AssistantPanel(QWidget):
                     f"<img src='{item[1]}' width='{w}'></a></div>")
         if kind == "note":
             return f"<div style='margin-top:6px; color:{u['text_dim']}; font-size:8pt'>{html.escape(item[1])}</div>"
+        if kind == "past_step":
+            color = u["warning"] if item[2] else u["text_dim"]
+            line = f"<span style='color:{color}'>{'✗' if item[2] else '✓'}&nbsp;{html.escape(item[1])}</span>"
+            if item[3]:
+                line += f"<span style='color:{u['text_dim']}'> — {html.escape(item[3])}</span>"
+            return f"<div style='margin-top:2px; font-size:8pt'>{line}</div>"
+        if kind == "rate":
+            i, rating = item[1], item[2]
+            style = f"style='color:{u['accent']}; text-decoration:none'"
+            if rating in ("up", "down"):
+                body = html.escape(tr("Thanks for the feedback."))
+            elif rating == "saved":
+                body = html.escape(tr("Saved as a test case."))
+            else:
+                body = (f"<a href='rate:up:{i}' {style}>👍</a>&nbsp;&nbsp;<a href='rate:down:{i}' {style}>👎</a>"
+                        f"&nbsp;&nbsp;·&nbsp;&nbsp;<a href='case:{i}' {style}>{html.escape(tr('Save as test case'))}</a>")
+            return f"<div style='margin-top:4px; color:{u['text_dim']}; font-size:8pt'>{body}</div>"
+        if kind == "limit":
+            return (f"<div style='margin-top:6px; color:{u['text_dim']}; font-size:8pt'>"
+                    f"{html.escape(tr('The assistant used the {0} steps it has for one answer.').format(item[1]))} "
+                    f"<a href='action:continue' style='color:{u['accent']}'>{html.escape(tr('Continue'))}</a></div>")
         if kind == "error":
             msg, status = item[1], item[2]
             bg = _mix(u["panel"], u["error"], 0.14)
@@ -933,7 +1314,12 @@ class AssistantPanel(QWidget):
             self._detail(_step_label(call.name, call.args), text)
         elif s.startswith("img:"):
             self._image(self._images.get(s[4:]))
-        elif s == "action:retry":
+        elif s.startswith("rate:"):
+            _, rating, i = s.split(":")
+            self._rate(int(i), rating)
+        elif s.startswith("case:"):
+            self._save_case(int(s[5:]))
+        elif s in ("action:retry", "action:continue"):
             if not self.busy() and self.agent is not None:
                 self._start(None)
         elif s == "action:settings":
@@ -1034,6 +1420,20 @@ class AISettingsDialog(QDialog):
         model_row.addWidget(self.model, 1)
         model_row.addWidget(test)
         self.base = QLineEdit()
+        self.effort = QComboBox()
+        for label, value in ((tr("Automatic"), ""), (tr("Low (faster, cheaper)"), "low"), (tr("Medium"), "medium"),
+                             (tr("High (more thorough)"), "high")):
+            self.effort.addItem(label, value)
+        self.effort.setCurrentIndex(max(0, self.effort.findData(s.get("ai_effort") or "")))
+        self.effort.setToolTip(tr("How much the model reasons before each step. Automatic uses each provider's default."))
+        self.lean = QCheckBox(tr("Fewer tools (for small local models)"))
+        self.lean.setToolTip(tr("Sends only the main tools, so small models pick the right one. Deleting, "
+                                "palettes and sounds are left out."))
+        self._leans: dict[str, bool] = {}
+        self.index_model = QLineEdit()
+        self.index_model.setToolTip(tr("Model with vision used to name the animations; empty uses the "
+                                       "default shown"))
+        self._index_models: dict[str, str] = {}
         self.test_label = QLabel()
         self.test_label.setWordWrap(True)
         self.test_label.hide()
@@ -1045,6 +1445,9 @@ class AISettingsDialog(QDialog):
         form.addRow(tr("API key"), key_row)
         form.addRow(tr("Model"), model_box)
         form.addRow(tr("Base URL"), self.base)
+        form.addRow(tr("Reasoning"), self.effort)
+        form.addRow(tr("Model for naming animations"), self.index_model)
+        form.addRow("", self.lean)
         form.addRow(hint_label(tr(
             "The key is stored in the Windows Credential Manager, never in the settings file. Without a "
             "saved key, the provider's environment variable is used (ANTHROPIC_API_KEY, OPENAI_API_KEY, "
@@ -1144,6 +1547,9 @@ class AISettingsDialog(QDialog):
         self.model.setEditText(model)
         self.base.setText(self._bases.get(name, s.get(f"ai_base_{name}") or ""))
         self.base.setPlaceholderText(cls.default_base)
+        self.lean.setChecked(self._leans.get(name, lean_tools(s, name)))
+        self.index_model.setText(self._index_models.get(name, s.get(f"ai_index_model_{name}") or ""))
+        self.index_model.setPlaceholderText(animindex.CHEAP.get(name) or tr("the same model as above"))
         self.test_label.setText("")
         self.test_label.hide()
 
@@ -1153,6 +1559,8 @@ class AISettingsDialog(QDialog):
             self._keys[name] = self.key.text().strip()
         self._models[name] = self.model.currentText().strip()
         self._bases[name] = self.base.text().strip()
+        self._leans[name] = self.lean.isChecked()
+        self._index_models[name] = self.index_model.text().strip()
 
     def _provider_changed(self) -> None:
         self._remember()
@@ -1219,6 +1627,11 @@ class AISettingsDialog(QDialog):
             s[f"ai_model_{name}"] = model
         for name, base in self._bases.items():
             s[f"ai_base_{name}"] = base
+        for name, lean in self._leans.items():
+            s[f"ai_lean_{name}"] = lean
+        for name, model in self._index_models.items():
+            s[f"ai_index_model_{name}"] = model
+        s["ai_effort"] = self.effort.currentData() or ""
         s["ai_provider"] = self._current
         s["ai_mcp_enabled"] = self.enabled.isChecked()
         s["ai_confirm"] = self.confirm.isChecked()
