@@ -687,6 +687,8 @@ class Dummy:
             return self.combo
         if name == "alive":
             return 1
+        if name in ("ishelper", "ailevel"):     # o oponente é um jogador parado
+            return 0
         if name == "id":
             return P2_ID
         if name in ("name", "displayname", "authorname"):
@@ -813,6 +815,7 @@ class Sim:
         self.p2.pose, self.p2.guard = p2_pose, p2_guard
         # cadeia de golpes (combo): os estados seguintes entram assim que podem
         self.chain, self.chain_at = tuple(chain), 0
+        self._seen_notes: set = set()
         if len(self.chain) > 1:
             self.cancels = combo_graph(char, char.all_statedefs(include_common=False))
         if p2_pose == "air":                        # subindo no pulo, à altura do peito do P1
@@ -2108,8 +2111,6 @@ class Sim:
             return
         if not self._chain_ok(ent, p):
             return
-        if not self._juggle_ok(ent, p, in_hit and d.fall):
-            return
         mine = self.boxes(ent, "1")
         if not mine:
             return
@@ -2118,6 +2119,9 @@ class Sim:
                  for a in mine for b in theirs
                  if a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]]
         if not inter:
+            return
+        # o juggle vem depois das caixas só para o aviso: sem encostar não há o que avisar
+        if not self._juggle_ok(ent, p, in_hit and d.fall):
             return
         contact = ((min(i[0] for i in inter) + max(i[2] for i in inter)) / 2,
                    (min(i[1] for i in inter) + max(i[3] for i in inter)) / 2)
@@ -2411,6 +2415,7 @@ class Sim:
             if d.pos[1] >= 0 and d.vel[1] > 0:
                 d.state, d.sub, d.vel, d.pos[1], d.ctrl = "stand", "", [0.0, 0.0], 0.0, True
                 d.airguard = False
+                d.juggle.clear()                  # fora do acerto: o atacante perde o alvo
                 return
             d.pos[0] += d.vel[0]
             d.pos[1] += d.vel[1]
@@ -2539,7 +2544,10 @@ class Sim:
                 d.state, d.vel, d.sub, d.ctrl = "stand", [0.0, 0.0], "", True
                 d.shake = 0
                 if not guard:
-                    d.combo, d.hitid = 0, -1
+                    self._recover(d)
+                # fora do acerto o atacante perde o alvo (Ikemen dropTargets): os pontos de
+                # juggle voltam ao máximo; antes ficavam gastos e o golpe seguinte não pegava
+                d.juggle.clear()
                 return
             d.pos[0] += d.vel[0]
             fr = self.const("movement.stand.friction") or 0.85
@@ -2701,14 +2709,22 @@ class Sim:
         self.tick += 1
 
     def chain_step(self) -> None:
-        """Passa ao próximo golpe da cadeia: cancela (há ChangeState com movecontact/movehit do
-        estado atual para ele e o golpe encostou) ou liga (o P1 já pode agir de novo)."""
+        """Passa ao próximo golpe da cadeia como o jogador faria: aperta o comando dele e roda os
+        ChangeState do [Statedef -1] e do estado atual, em ordem, com todos os gatilhos (Var,
+        ctrl, statetype, MoveContact...). O primeiro que disparar é o que sai. Só quando o .cmd
+        não tem caminho para o golpe (ou o gatilho não é suportado) vale a regra antiga: cancela
+        se há ChangeState com movecontact/movehit e o golpe encostou, liga se o P1 tem ctrl."""
         if self.chain_at + 1 >= len(self.chain):
             return
         p1, nxt = self.p1, self.chain[self.chain_at + 1]
-        if p1.hitpause:
+        got = self._press_for(nxt)
+        if got in ("cancela", "liga"):
+            how = got
+        elif got is False:
             return
-        if nxt in self.cancels.get(p1.stateno, ()) and (p1.movecontact or p1.movehit):
+        elif p1.hitpause:
+            return
+        elif nxt in self.cancels.get(p1.stateno, ()) and (p1.movecontact or p1.movehit):
             how = "cancela"
         elif p1.ctrl or p1.stateno in IDLE_STATES:
             how = "liga"
@@ -2720,15 +2736,103 @@ class Sim:
         self.enter(p1, nxt)
         p1.started = False                     # o tick 0 do golpe novo roda no próximo passo
 
+    _CMD_RE = re.compile(r'(?<![!\w])command\s*=\s*"([^"]+)"', re.I)
+    _TO_STATE = ("changestate", "selfstate")
+
+    def _routes_to(self, n: int) -> list[tuple[str, dict, frozenset]]:
+        """ChangeState para o estado n no [Statedef -1] e no estado atual, cada um com os
+        comandos que ele pede (os que não vêm negados)."""
+        out = []
+        for where in (-1, self.p1.stateno):
+            sd = self.statedef(where)
+            for c in (sd[1] if sd else ()):
+                if c.get("type") not in self._TO_STATE or _lit(c["params"].get("value")) != n:
+                    continue
+                text = " ".join([*c["triggerall"], *(t for v in c["triggers"].values() for t in v)])
+                out.append((where, c, frozenset(self._CMD_RE.findall(text))))
+        return out
+
+    _CONTACT_RE = re.compile(r"(?<![!\w])move(contact|hit|guarded)\b", re.I)
+
+    def _fires(self, ent, c) -> list[list[str]]:
+        """Os grupos de gatilho do controlador que disparam (vazio: não dispara), sem engolir
+        o gatilho não suportado (levanta Unsupported)."""
+        if ent.hitpause and not self.ev(ent, c["params"].get("ignorehitpause", "0"), 0):
+            return []
+        for t in c["triggerall"]:
+            if not simexpr.evaluate(t, ent):
+                return []
+        return [c["triggers"][k] for k in sorted(c["triggers"])
+                if all(simexpr.evaluate(t, ent) for t in c["triggers"][k])]
+
+    def _press_for(self, nxt: int):
+        """Aperta o comando do próximo golpe neste tick. "cancela" ou "liga": o .cmd (ou o
+        estado atual) muda para ele, cancelando (o gatilho que disparou pede contato do golpe)
+        ou ligando; False: nada muda (ou outro golpe sairia no lugar); None: não há como saber
+        (o golpe não tem ChangeState com comando ou o gatilho dele não é suportado)."""
+        routes = [r for r in self._routes_to(nxt) if r[2]]
+        if not routes:
+            return None
+        p1, base = self.p1, self.commands
+        unknown = False
+        try:
+            for cmds in dict.fromkeys(r[2] for r in routes):
+                self.commands = base | cmds
+                for where in (-1, p1.stateno):          # o -1 roda antes do estado atual
+                    sd = self.statedef(where)
+                    for c in (sd[1] if sd else ()):
+                        if c.get("type") not in self._TO_STATE:
+                            continue
+                        mine = _lit(c["params"].get("value")) == nxt
+                        try:
+                            groups = self._fires(p1, c)
+                            if not groups:
+                                continue
+                        except simexpr.Unsupported as ex:
+                            if mine:                     # o caminho do golpe não dá para ler
+                                self.note(str(ex))
+                                unknown = True
+                            continue
+                        if mine:
+                            text = " ".join([*c["triggerall"], *(t for g in groups for t in g)])
+                            hit = p1.movecontact or p1.movehit or p1.moveguarded
+                            free = p1.ctrl or p1.stateno in IDLE_STATES
+                            contact = hit and self._CONTACT_RE.search(text)
+                            return "cancela" if contact or not free else "liga"
+                        # o mesmo botão tira outro golpe aqui (no motor, ele sairia no lugar)
+                        other = _lit(c["params"].get("value"))
+                        if other is not None and other != p1.stateno:
+                            key = ("diverted", nxt, other)
+                            if key not in self._seen_notes:
+                                self._seen_notes.add(key)
+                                self.note(tr("the command of state {0} gives state {1} here")
+                                          .format(nxt, other))
+                        break
+                    else:
+                        continue
+                    break
+        finally:
+            self.commands = base
+        # no neutro o jogador ajeita a postura antes (agacha, corre, pula): o .cmd pede
+        # statetype = C ou stateno = 100 que o boneco parado não tem. Ali vale a regra antiga
+        if unknown or p1.ctrl and p1.stateno in IDLE_STATES:
+            return None
+        return False
+
     def run(self, until_idle: bool = True):
         if self.statedef(self.p1.stateno) is None:   # estado que não existe: um tick só, com a nota
             self.step()
             return self
+        idle = 0
         while self.tick < self.max_ticks:
             self.step()
             if self.chain:
                 self.chain_step()
-            if until_idle and self.p1.stateno in (0, 52, 11, 20) and self.tick > 5 \
+            # golpe da cadeia ainda por sair: o P1 parado espera um pouco (pousou no 52 e o
+            # .cmd pede o ctrl do 0); sem sair em 30 ticks parado, a cadeia não anda mais
+            idle = idle + 1 if self.p1.stateno in IDLE_STATES else 0
+            pending = self.chain_at + 1 < len(self.chain) and idle < 30
+            if until_idle and self.p1.stateno in (0, 52, 11, 20) and self.tick > 5 and not pending \
                     and not any(h.alive for h in self.helpers) and not self.live_explods \
                     and not self.projs and (self.p2.state == "stand" or
                                             self.p2.state == "down" and self.p2.sub == "lie"):
@@ -3406,10 +3510,19 @@ def frame_data(sim: Sim) -> dict:
     return out
 
 
-def cancel_targets(char, state: int, sds=None) -> dict:
+# condição de "modo" num gatilho de cancelamento: variável, energia, helper, explod ou IA (o
+# negado, como !AILevel, não conta). Com ela o cancelamento não vale sempre (issue 14: o 200
+# do Garuda só cancela com Var(2) > 0)
+_MODE_RE = re.compile(r"(?<![!\w])(?:(?:sys)?f?var\s*\(|power\b|numhelper\b|numexplod\b|ailevel\b)", re.I)
+
+
+def cancel_targets(char, state: int, sds=None, conditional: bool = False) -> dict:
     """Para onde o golpe cancela ao encostar: {"acerto": {...}, "defesa": {...}}. ChangeState
     com movehit só cancela no acerto, com moveguarded só na defesa, com movecontact nos dois;
-    vale o do próprio estado e o do [Statedef -1] com `stateno = ...` que o cobre."""
+    vale o do próprio estado e o do [Statedef -1] com `stateno = ...` que o cobre (este também
+    sem contato: `stateno = 200 && time > 5` cancela no acerto e na defesa). Cada grupo
+    de gatilho (triggerall e um triggerN) conta sozinho, como no motor. Os que também pedem
+    uma condição de modo (Var, Power, NumHelper...) só entram com conditional=True."""
     sds = sds or char.all_statedefs(include_common=False)
     out = {"acerto": set(), "defesa": set()}
     for n, (sd, _) in sds.items():
@@ -3418,27 +3531,42 @@ def cancel_targets(char, state: int, sds=None) -> dict:
         for c in sd.controllers:
             if c.type.lower() != "changestate":
                 continue
-            t = " ".join(x for v in c.triggers().values() for x in v).lower()
             v = _lit(c.section.get("value"))
-            if v is None or v == state or not re.search(r"move(contact|hit|guarded)", t):
+            if v is None or v == state:
                 continue
-            if n == -1:
-                covers = any(int(a) <= state <= int(b or a) for a, b in
-                             re.findall(r"stateno\s*=\s*\[?\s*(\d+)\s*(?:,\s*(\d+))?", t))
-                if not covers:
+            trig = c.triggers()
+            alls = " ".join(trig.get("triggerall", []))
+            for key, group in trig.items():
+                if key == "triggerall":
                     continue
-            # o que o gatilho pede, sem contar os negados (!movehit não é "cancela no acerto")
-            has = {w for w in ("movecontact", "movehit", "moveguarded")
-                   if re.search(rf"(?<![!\w]){w}\b", t)}
-            kinds = set()
-            if "movecontact" in has or {"movehit", "moveguarded"} <= has:
-                kinds = {"acerto", "defesa"}                  # movehit || moveguarded = os dois
-            elif "movehit" in has:
-                kinds = {"acerto"}
-            elif "moveguarded" in has:
-                kinds = {"defesa"}
-            for k in kinds:
-                out[k].add(v)
+                t = (alls + " " + " ".join(group)).lower()
+                touch = bool(re.search(r"move(contact|hit|guarded)", t))
+                if n == -1:
+                    covers = any(int(a) <= state <= int(b or a) for a, b in
+                                 re.findall(r"stateno\s*=\s*\[?\s*(\d+)\s*(?:,\s*(\d+))?", t))
+                    if not covers:
+                        continue
+                elif not touch:                            # no próprio estado só o de contato
+                    continue
+                if bool(_MODE_RE.search(t)) != conditional:
+                    continue
+                # o que o gatilho pede, sem contar os negados (!movehit não é "cancela no acerto")
+                has = {w for w in ("movecontact", "movehit", "moveguarded")
+                       if re.search(rf"(?<![!\w]){w}\b", t)}
+                kinds = set()
+                if not touch:                              # cancela sem contato (time, HitDefAttr...)
+                    kinds = {"acerto", "defesa"}
+                elif "movecontact" in has or {"movehit", "moveguarded"} <= has:
+                    kinds = {"acerto", "defesa"}              # movehit || moveguarded = os dois
+                elif "movehit" in has:
+                    kinds = {"acerto"}
+                elif "moveguarded" in has:
+                    kinds = {"defesa"}
+                for k in kinds:
+                    out[k].add(v)
+    if conditional:                                       # o que já cancela sempre não é condicional
+        free = cancel_targets(char, state, sds)
+        out = {k: s - free[k] for k, s in out.items()}
     return out
 
 
@@ -3454,7 +3582,8 @@ def _cancel_data(sim: Sim, track, p1, contacts, p2_ctrl, outcome) -> dict | None
     if state is None:
         return None
     into = sorted(cancel_targets(sim.char, state)[outcome])
-    if not into:
+    cond = sorted(cancel_targets(sim.char, state, conditional=True)[outcome])
+    if not into and not cond:
         return None
 
     def first_free_after(t):
@@ -3469,7 +3598,7 @@ def _cancel_data(sim: Sim, track, p1, contacts, p2_ctrl, outcome) -> dict | None
     moving = sum(1 for i in range(start, end + 1) if not track[i]["pause"] and not p1[i].get("frozen"))
     adv = p2_ctrl - last if p2_ctrl is not None and last is not None and last <= end else None
     frame = 1 + sum(1 for i in range(start) if not track[i]["pause"] and not (p1[i] or {}).get("frozen"))
-    return {"into": into, "from": frame, "window": moving, "advantage": adv}
+    return {"into": into, "conditional": cond, "from": frame, "window": moving, "advantage": adv}
 
 
 _ENGINE_SND: dict[str, object] = {}
@@ -3593,15 +3722,21 @@ def combo_graph(char, sds=None) -> dict:
     sds = sds or char.all_statedefs(include_common=False)
     edges: dict[int, set[int]] = {}
 
-    def trig(c):
-        return " ".join(x for v in c.triggers().values() for x in v).lower()
+    def groups(c):
+        """Cada grupo de gatilho (triggerall + triggerN) que pede contato e nenhum modo."""
+        trig = c.triggers()
+        alls = " ".join(trig.get("triggerall", []))
+        for k, g in trig.items():
+            t = (alls + " " + " ".join(g)).lower()
+            if k != "triggerall" and re.search(r"move(contact|hit)", t) and not _MODE_RE.search(t):
+                yield t
     for n, (sd, _) in sds.items():
         for c in sd.controllers:
             if c.type.lower() != "changestate":
                 continue
-            t = trig(c)
             v = _lit(c.section.get("value"))
-            if v is None or not re.search(r"move(contact|hit)", t):
+            t = " ".join(groups(c))
+            if v is None or not t:
                 continue
             if n >= 0:
                 edges.setdefault(n, set()).add(v)

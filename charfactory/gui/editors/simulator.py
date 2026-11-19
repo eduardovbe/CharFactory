@@ -1511,10 +1511,14 @@ class SimulatorPage(QWidget):
             out.append(f"{where} <b>{adv:+d}</b>" + (tr(" (blockstun {0:+d})").format(stun) if stun is not None else ""))
         cx = fd.get("cancel")
         if cx:
-            into = ", ".join(map(str, cx["into"][:4])) + ("…" if len(cx["into"]) > 4 else "")
+            # o cancelamento que pede Var/Power/NumHelper ganha * (não vale sempre)
+            names = [str(n) for n in cx["into"]] + [f"{n}*" for n in cx.get("conditional", [])]
+            into = ", ".join(names[:4]) + ("…" if len(names) > 4 else "")
             txt = tr("cancel {0} → {1}: from frame {2}, {3} frames").format(where, into, cx["from"], cx["window"])
             if cx["advantage"] is not None:
                 txt += tr(", P2 stuck {0}").format(f"<b>{cx['advantage']:+d}</b>")
+            if cx.get("conditional"):
+                txt += tr(" (* only under a condition: Var, Power, helper…)")
             out.append(txt)
         return out
 

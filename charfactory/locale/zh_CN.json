@@ -2293,5 +2293,7 @@
  "Turn off to see only the boxes": "关闭后仅显示碰撞框",
  "Click a frame to select it (arrows: previous/next). Drag to inspect the animation tick by tick. Drag the right edge of a frame to change its time (Shift+drag stretches or compresses the whole animation); Ctrl+drag the middle of a frame to change the order; right-click for more, including locking the timing. Esc cancels.": "单击帧以选中(方向键:上一帧/下一帧)。拖动可逐 tick 检查动画。拖动帧的右边缘可更改其时长(Shift+拖动可拉伸或压缩整个动画);按住 Ctrl 拖动帧的中部可更改顺序;右键单击查看更多选项,包括锁定时长。按 Esc 取消。",
  "Interpolate from the previous frame (MUGEN 1.1)": "从上一帧插值 (MUGEN 1.1)",
- "Preview tick within the current frame (, and . step one tick)": "预览当前帧内的某个 tick(, 和 . 逐 tick 移动)"
+ "Preview tick within the current frame (, and . step one tick)": "预览当前帧内的某个 tick(, 和 . 逐 tick 移动)",
+ "the command of state {0} gives state {1} here": "状态 {0} 的指令在此处会触发状态 {1}",
+ " (* only under a condition: Var, Power, helper…)": "（* 仅在满足条件时：Var、Power、helper…）"
 }

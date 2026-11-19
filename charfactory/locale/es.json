@@ -2293,5 +2293,7 @@
  "Turn off to see only the boxes": "Desactívalo para ver solo las cajas",
  "Click a frame to select it (arrows: previous/next). Drag to inspect the animation tick by tick. Drag the right edge of a frame to change its time (Shift+drag stretches or compresses the whole animation); Ctrl+drag the middle of a frame to change the order; right-click for more, including locking the timing. Esc cancels.": "Haz clic en un frame para seleccionarlo (flechas: anterior/siguiente). Arrastra para inspeccionar la animación tick a tick. Arrastra el borde derecho de un frame para cambiar su tiempo (Shift+arrastrar estira o comprime toda la animación); Ctrl+arrastrar el centro de un frame cambia el orden; clic derecho para más opciones, incluido bloquear los tiempos. Esc cancela.",
  "Interpolate from the previous frame (MUGEN 1.1)": "Interpolar desde el frame anterior (MUGEN 1.1)",
- "Preview tick within the current frame (, and . step one tick)": "Ver un tick dentro del frame actual (, y . avanzan un tick)"
+ "Preview tick within the current frame (, and . step one tick)": "Ver un tick dentro del frame actual (, y . avanzan un tick)",
+ "the command of state {0} gives state {1} here": "el comando del estado {0} saca el estado {1} aquí",
+ " (* only under a condition: Var, Power, helper…)": " (* solo con una condición: Var, Power, helper…)"
 }

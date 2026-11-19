@@ -322,18 +322,56 @@ def test_sound_track_mixes_the_move_sounds(mugen_dir):
 
 def test_chain_cancels_links_and_finds_where_the_combo_breaks(mugen_dir):
     """Cadeia de golpes: o soco baixo do kfm (400) liga nele mesmo (CtrlSet no tick 6) e cancela
-    no 410 (ChangeState com movecontact no 400); soco fraco em pé -> forte não é combo (+1 no
-    acerto e 8 de preparo: o P2 se recupera antes)."""
+    no 410 (ChangeState com movecontact no 400); o 200 cancela no 210 pelo .cmd; soco forte ->
+    chute forte não é combo (o P2 se recupera antes)."""
     from charfactory.project import Character
     from charfactory.tools import simulate as SIM
     c = Character(mugen_dir / "chars" / "kfm" / "kfm.def")
     r = SIM.chain_report(SIM.simulate(c, 400, p2_dist=40, chain=(400, 400, 410)))
     assert r["complete"] and [s["how"] for s in r["steps"]] == ["liga", "cancela"]
     assert r["hits"] == 3 and r["combo"] == 3 and r["broke"] is None
+    # o .cmd do kfm deixa o 210 cancelar o 200 (stateno = 200 && time > 5): é combo
     r = SIM.chain_report(SIM.simulate(c, 200, p2_dist=40, chain=(200, 210)))
-    assert r["complete"] and r["hits"] == 2 and r["combo"] == 1 and r["broke"]["state"] == 210
+    assert [s["how"] for s in r["steps"]] == ["cancela"] and r["combo"] == 2
+    r = SIM.chain_report(SIM.simulate(c, 210, p2_dist=40, chain=(210, 230)))
+    assert r["complete"] and r["hits"] == 2 and r["combo"] == 1 and r["broke"]["state"] == 230
     fd = SIM.frame_data(SIM.simulate(c, 400, p2_dist=40, chain=(400, 400, 410)))
     assert fd["phases"].count("livre") < 10                  # livre só depois do último golpe
+
+
+def test_chain_follows_the_cmd_triggers_and_recovery_frees_juggle(tmp_path):
+    """Issue 14: a cadeia aperta o comando e roda o [Statedef -1] com todos os gatilhos. O
+    cancelamento que pede Var(2) > 0 não vale com a variável zerada, então o golpe liga depois
+    do ctrl. Quando o P2 sai do acerto no chão, o atacante perde o alvo e os pontos de juggle
+    voltam (antes ficavam gastos e, com airjuggle = 0, o golpe seguinte não pegava)."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_constant(c, "Data", "airjuggle", "0")
+    for n, end in ((9970, 12), (9971, 8)):
+        ops.set_statedef_text(c, n, "\n".join([
+            f"[Statedef {n}]", "type = S", "movetype = A", "physics = S", "anim = 9970", "ctrl = 0",
+            "juggle = 15", "",
+            f"[State {n}, hd]", "type = HitDef", "trigger1 = time = 0", "attr = S, NA",
+            "pausetime = 0, 0", "ground.hittime = 5", "ground.velocity = 0", "sparkno = -1", "",
+            f"[State {n}, fim]", "type = ChangeState", f"trigger1 = time >= {end}", "value = 0",
+            "ctrl = 1", ""]))
+    ops.set_statedef_text(c, -1, "\n".join([
+        "[Statedef -1]", "", "[State -1, golpe]", "type = ChangeState", "value = 9971",
+        'triggerall = command = "x"', "trigger1 = ctrl",
+        "trigger2 = Var(2) > 0", "trigger2 = MoveContact", "trigger2 = StateNo = 9970", ""]))
+    sim = simulate.simulate(c, 9970, p2_dist=30, chain=(9970, 9971))
+    r = simulate.chain_report(sim)
+    assert [s["how"] for s in r["steps"]] == ["liga"] and r["steps"][0]["t"] > 10
+    assert r["hits"] == 2 and r["combo"] == 1                 # o P2 se recuperou: pega, sem combo
+    assert not any("juggle" in n for n in sim.unsupported)
+    # o frame data não diz que cancela sempre: o cancelamento pede Var(2) e fica marcado
+    assert simulate.cancel_targets(c, 9970) == {"acerto": set(), "defesa": set()}
+    assert simulate.cancel_targets(c, 9970, conditional=True)["acerto"] == {9971}
+    # no [Statedef -1], `stateno = ...` sem contato também cancela (o especial sobre o normal)
+    ops.set_statedef_text(c, -1, "\n".join([
+        "[Statedef -1]", "", "[State -1, especial]", "type = ChangeState", "value = 9971",
+        'triggerall = command = "x"', "trigger1 = StateNo = 9970", "trigger1 = Time > 2", ""]))
+    assert simulate.cancel_targets(c, 9970)["defesa"] == {9971}
 
 
 def _hit_char(tmp_path):
