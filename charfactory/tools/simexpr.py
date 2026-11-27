@@ -33,19 +33,51 @@ TOKEN = re.compile(r"""
 
 # gatilhos seguidos de um eixo (x/y/z)
 AXIS = {"pos", "vel", "p2dist", "p2bodydist", "p1dist", "screenpos", "rootdist", "parentdist",
-        "p2pos", "hitvel", "gethitvar", "camerapos"}
+        "p2pos", "hitvel", "gethitvar", "camerapos", "scale", "offset", "alpha", "localcoord"}
+# eixos aceitos depois do nome (alpha s / alpha d)
+AXIS_WORDS = ("x", "y", "z", "s", "d")
+# gatilhos com um nome entre parênteses: IkemenVersion(major)
+# Ikemen checkEquality com IgnoreMostErrors: na 1ª parte do AnimElem/TimeMod qualquer
+# operador que termina em "=" vale como "=" (AnimElem >= 3 é AnimElem = 3)
+OLD_EQ = ("=", "!=", ">=", "<=")
+NAME_ARG = {"ikemenversion", "mugenversion", "isasserted", "map"}
+# gatilhos de leitura do Ikemen 1.0 e o formato dos argumentos (e = expressão, w = palavra)
+VAR_ARGS = {"explodvar": "eew", "projvar": "eew", "soundvar": "ew", "clsnvar": "wew",
+            "clsnoverlap": "wew", "projclsnoverlap": "eew", "helpervar": "w", "palfxvar": "w",
+            "movehitvar": "w", "animelemvar": "w", "stagevar": "w", "gameoption": "w",
+            "envshakevar": "w", "inputtime": "w", "fightscreenvar": "w", "fightscreenstate": "w",
+            "motifvar": "w", "motifstate": "w", "gamevar": "w", "zoomvar": "w", "bgmvar": "w",
+            "stageconst": "w", "stagebgvar": "eew", "spritevar": "w", "analog": "w", "shader": "w"}
 REDIRECT = {"enemynear", "enemy", "root", "parent", "helper", "target", "p2", "partner",
             "playerid", "player"}
-LETTERS = {"statetype", "movetype", "p2statetype", "p2movetype", "physics"}
+LETTERS = {"statetype", "movetype", "p2statetype", "p2movetype", "physics", "prevstatetype",
+           "prevmovetype"}
 # comparados com uma palavra ou um texto: teammode = single, name = "Kung Fu Man"
-WORDS = {"teammode", "name", "p1name", "p2name", "p3name", "p4name", "authorname", "displayname",
-         "gamemode", "stagevar"}
+WORDS = {"teammode", "name", "p1name", "p2name", "p3name", "p4name", "p5name", "p6name", "p7name",
+         "p8name", "authorname", "displayname", "gamemode", "stagevar", "helpername"}
 ASSIGNABLE = {"var", "fvar", "sysvar", "sysfvar", "zsslocal"}
+# atributos de golpe (Ikemen trgAttr): o código e os tipos que ele cobre
+ATTR_CODES = {"na": "na", "nt": "nt", "np": "np", "sa": "sa", "st": "st", "sp": "sp",
+              "ha": "ha", "ht": "ht", "hp": "hp", "aa": "na sa ha", "at": "nt st ht",
+              "ap": "np sp hp", "n": "na nt np", "s": "sa st sp", "h": "ha ht hp", "a": "ha ht hp"}
+# gatilhos comparados com atributos: HitDefAttr = SCA, AT | HitByAttr(SCA, AT)
+ATTR_TRIGGERS = {"hitdefattr", "reversaldefattr"}
+
+
+def parse_attr(text: str) -> tuple[str, frozenset]:
+    """`S, NA` / `SCA, AT, AP` -> ("S", {"na"}) / ("SCA", {"nt", "st", ...}), como o attr do
+    HitDef (o tipo de estado e os tipos de golpe)."""
+    parts = [p.strip().lower() for p in (text or "").split(",")]
+    sca = "".join(ch for ch in parts[0].upper() if ch in "SCA") if parts else ""
+    atk = set()
+    for p in parts[1:]:
+        atk.update(ATTR_CODES.get(p, "").split())
+    return sca, frozenset(atk)
 FUNCS = {"ifelse", "cond", "cos", "sin", "tan", "acos", "asin", "atan", "abs", "floor", "ceil",
          "exp", "ln", "log", "min", "max", "sign", "clamp", "sqrt", "var", "fvar", "sysvar",
          "sysfvar", "const", "animelemtime", "animelemno", "animexist", "selfanimexist",
          "numhelper", "numexplod", "numtarget", "numprojid", "projhittime", "projcontacttime",
-         "ishelper", "stateno", "gethitvar", "const240p", "const480p", "const720p",
+         "ishelper", "stateno", "gethitvar", "const240p", "const480p", "const720p", "const1080p",
          "animelemlength"}
 
 
@@ -67,9 +99,27 @@ def _num(tok: str):
     return float(tok) if "." in tok else int(tok)
 
 
+class _Undef(int):
+    """O valor indefinido do Ikemen (BytecodeUndefined): vale 0 nas contas e comparações, é
+    falso no fim, e o `!`, a faixa e o abs o preservam."""
+
+    def __new__(cls):
+        return super().__new__(cls, 0)
+
+    def __repr__(self):
+        return "UNDEF"
+
+
+UNDEF = _Undef()
+
+
+def is_undef(v) -> bool:
+    return isinstance(v, _Undef)
+
+
 def _div(a, b):
     if b == 0:
-        return 0                                   # MUGEN: divisão por zero dá 0 (e avisa)
+        return UNDEF                               # Ikemen: divisão por zero é indefinido
     if isinstance(a, int) and isinstance(b, int):
         q = abs(a) // abs(b)
         return q if (a >= 0) == (b >= 0) else -q   # trunca para zero
@@ -78,7 +128,7 @@ def _div(a, b):
 
 def _mod(a, b):
     if b == 0:
-        return 0
+        return UNDEF
     if isinstance(a, int) and isinstance(b, int):
         r = abs(a) % abs(b)
         return r if a >= 0 else -r
@@ -194,6 +244,21 @@ class Parser:
             raise Unsupported(tr("redirection without a trigger: {0}").format(name))
         return self.after_name(name)
 
+    def attr_list(self):
+        """O texto de atributos do Ikemen (trgAttr): o tipo de estado (letras S, C, A) e, depois
+        de cada vírgula, um tipo de golpe; para no primeiro item que não é tipo de golpe (a
+        vírgula fica para quem chamou)."""
+        kind, val = self.peek()
+        if kind != "name" or not val or any(ch not in "SCAsca" for ch in val):
+            raise Unsupported(tr("invalid attr value in {0!r}").format(self.text))
+        self.take()
+        sca, atk = val.upper(), set()
+        while self.peek()[1] == "," and self.peek(1)[0] == "name" \
+                and self.peek(1)[1].lower() in ATTR_CODES:
+            self.take(",")
+            atk.update(ATTR_CODES[self.take()[1].lower()].split())
+        return sca, frozenset(atk)
+
     def primary_trigger_chain(self):
         """O gatilho depois do redirecionamento (pode ter operadores unários, não binários)."""
         return self.unary()
@@ -215,8 +280,10 @@ class Parser:
 
     def after_name(self, name):
         # formas especiais
-        if name == "animelem" and self.peek()[1] == "=":
-            self.take("=")
+        # Ikemen parseOldAnimElemStyle: com IgnoreMostErrors (o padrão) o `!=` da 1ª parte vale
+        # como `=` (AnimElem != 6 é AnimElem = 6); o mesmo no TimeMod
+        if name == "animelem" and self.peek()[1] in OLD_EQ:
+            self.take()
             n = self.expr(7)                      # acima de = e !=
             op, m, _ = self.old_compare()
             return ("animelem", n, op, m)
@@ -229,8 +296,8 @@ class Parser:
             n = self.expr(7)
             op, m, comma = self.old_compare()
             return ("projold", old.group(1) + "time", int(old.group(2) or 0), n, op, m, comma)
-        if name == "timemod" and self.peek()[1] == "=":
-            self.take("=")
+        if name == "timemod" and self.peek()[1] in OLD_EQ:
+            self.take()
             d = self.expr(7)
             op, r, _ = self.old_compare()
             if op is None:
@@ -240,7 +307,15 @@ class Parser:
             op = self.take()[1]
             letter = self.take()[1]
             return ("letter", name, op, letter.upper())
-        if name == "command" and self.peek()[1] in ("=", "!="):
+        if name in ATTR_TRIGGERS and self.peek()[1] in ("=", "!="):
+            op = self.take()[1]
+            return ("attr", name, op) + self.attr_list()
+        if name == "hitbyattr" and self.peek()[1] == "(":
+            self.take("(")
+            node = ("attr", name, "=") + self.attr_list()
+            self.take(")")
+            return node
+        if name in ("command", "selfcommand") and self.peek()[1] in ("=", "!="):
             op = self.take()[1]
             s = self.take()[1].strip('"')
             return ("command", op, s)
@@ -263,9 +338,31 @@ class Parser:
                 parts.append(self.take()[1])
             self.take(")")
             return ("trig", "gethitvar", ("str", "".join(parts).lower()))
+        if name in VAR_ARGS and self.peek()[1] == "(":
+            # gatilhos de leitura do Ikemen: e = expressão, w = palavra (pode ter eixo: pos x)
+            self.take("(")
+            args = []
+            for i, kind in enumerate(VAR_ARGS[name]):
+                if i:
+                    self.take(",")
+                if kind == "e":
+                    args.append(self.expr())
+                else:
+                    words = []
+                    while self.peek()[1] not in (",", ")") and self.peek()[0] is not None:
+                        words.append(self.take()[1])
+                    args.append(("str", " ".join(words).lower()))
+            self.take(")")
+            return ("varcall", name, args)
+        if name in NAME_ARG and self.peek()[1] == "(":
+            self.take("(")
+            word = self.take()[1].lower()
+            self.take(")")
+            return ("trig", name, ("str", word))
         if name in AXIS:
             axis = None
-            if self.peek()[0] == "name" and self.peek()[1].lower() in ("x", "y", "z"):
+            if self.peek()[0] == "name" and self.peek()[1].lower() in AXIS_WORDS \
+                    and (name == "alpha") == (self.peek()[1].lower() in ("s", "d")):
                 axis = self.take()[1].lower()
             return ("trig", f"{name} {axis}" if axis else name, None)
         if self.peek()[1] == "(" and (name in FUNCS or name not in ("time",)):
@@ -361,7 +458,7 @@ def _ev(n, ctx):
     if k == "un":
         v = _ev(n[2], ctx)
         if n[1] == "!":
-            return _b(not v)
+            return v if is_undef(v) else _b(not v)    # Ikemen blnot: !indefinido continua indefinido
         if n[1] == "-":
             return -v
         if n[1] == "~":
@@ -370,6 +467,8 @@ def _ev(n, ctx):
     if k == "interval":
         _, op, left, (lo_incl, a, b, hi_incl) = n
         v, lo, hi = _ev(left, ctx), _ev(a, ctx), _ev(b, ctx)
+        if is_undef(v) or is_undef(lo) or is_undef(hi):
+            return UNDEF                               # Ikemen rangeCheck
         inside = (v >= lo if lo_incl else v > lo) and (v <= hi if hi_incl else v < hi)
         return _b(inside if op == "=" else not inside)
     if k == "animelem":
@@ -397,6 +496,11 @@ def _ev(n, ctx):
     if k == "letter":
         v = ctx.trigger(n[1], None)
         return _b((v == n[3]) == (n[2] == "="))
+    if k == "varcall":
+        return ctx.trigger(n[1], [_ev(a, ctx) for a in n[2]])
+    if k == "attr":
+        v = bool(ctx.trigger(n[1], (n[3], n[4])))
+        return _b(v == (n[2] == "="))
     if k == "word":
         v = str(ctx.trigger(n[1], None)).lower()
         return _b((v == n[3]) == (n[2] == "="))
@@ -411,12 +515,8 @@ def _ev(n, ctx):
     if k == "redirect":
         arg = _ev(n[2], ctx) if n[2] is not None else None
         other = ctx.redirect(n[1], arg)
-        if other is None:
-            msg = tr("redirection without a target: {0}").format(n[1])
-            if getattr(ctx, "lenient_redirect", False):     # Ikemen: vale falso só ali
-                ctx.sim.note(msg)
-                return 0
-            raise Unsupported(msg)
+        if other is None:                              # Ikemen: sem alvo o valor é indefinido
+            return UNDEF
         return _ev(n[3], other)
     if k == "call":
         name, args = n[1], n[2]
@@ -428,8 +528,10 @@ def _ev(n, ctx):
              "exp": math.exp, "sqrt": lambda v: math.sqrt(max(0, v)),
              "acos": lambda v: math.acos(max(-1, min(1, v))),
              "asin": lambda v: math.asin(max(-1, min(1, v))), "atan": math.atan,
-             "ln": lambda v: math.log(v) if v > 0 else 0,
+             "ln": lambda v: math.log(v) if v > 0 else UNDEF,
              "sign": lambda v: (v > 0) - (v < 0)}.get(name)
+        if name == "abs" and is_undef(vals[0]):
+            return UNDEF
         if f:
             return f(vals[0])
         if name == "log":

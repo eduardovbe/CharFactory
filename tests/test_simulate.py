@@ -152,7 +152,7 @@ def test_p2stateno_trigger_follows_the_custom_state(tmp_path):
     ops.set_action_text(c, "[Begin Action 9970]\nClsn1Default: 1\n Clsn1[0] = 0,-60,40,0\n0,0, 0,0, 40\n")
     ops.set_statedef_text(c, 9970, (
         "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
-        "[State 9970, prende]\ntype = HitDef\ntrigger1 = time = 2\ndamage = 30\npausetime = 4, 4\n"
+        "[State 9970, prende]\ntype = HitDef\ntrigger1 = time = 2\nattr = S, NA\ndamage = 30\npausetime = 4, 4\n"
         "p2stateno = 9990\np2getp1state = 1\nsparkno = -1\n\n"
         "[State 9970, viu]\ntype = ChangeState\ntrigger1 = p2stateno = 9990\n"
         "trigger1 = enemynear, stateno = 9990\nvalue = 9971\n\n"
@@ -169,6 +169,40 @@ def test_p2stateno_trigger_follows_the_custom_state(tmp_path):
     states = [e["value"] for e in sim.events if e["kind"] == "estado" and e["who"] == "P1"]
     assert states == [9970, 9971, 9972]     # viu o oponente no 9990 e depois solto pelo TargetState
     assert sim.p2.custom == 0
+
+
+def test_p2_custom_state_angledraw_and_sprpriority(tmp_path, monkeypatch):
+    """Issue 15 (SFV Ryu): no arremesso o P2 roda o estado do atacante com AngleDraw e
+    SprPriority. O ângulo e a escala do tick vão para o registro e o desenho do P2 gira (antes
+    só o P1 girava); a prioridade põe o P2 na frente do P1."""
+    from charfactory import project
+    from charfactory.tools import generate, ops, simulate
+    c = project.load(generate.new_character(tmp_path / "src", "S"))
+    ops.set_action_text(c, "[Begin Action 9970]\nClsn1Default: 1\n Clsn1[0] = 0,-60,40,0\n0,0, 0,0, 40\n")
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, prende]\ntype = HitDef\ntrigger1 = time = 2\nattr = S, NT\npausetime = 0, 0\n"
+        "p2stateno = 9990\nsparkno = -1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 30\nvalue = 0\nctrl = 1\n"))
+    ops.set_statedef_text(c, 9990, (
+        "[Statedef 9990]\ntype = S\nmovetype = H\nphysics = N\nanim = 0\nsprpriority = 5\n\n"
+        "[State 9990, gira]\ntype = AngleDraw\ntrigger1 = time >= 2\nvalue = time * 10\n"
+        "scale = 1.5, 1.5\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=30, max_ticks=40)
+    spun = [r for r in sim.track if r["p2"]["custom"] and r["p2"]["angle"]]
+    assert spun and spun[0]["p2"]["angle"] == 20 and spun[1]["p2"]["angle"] == 30
+    assert spun[0]["p2"]["scale"] == (1.5, 1.5) and spun[0]["p2"]["spr"] == 5
+    # o desenho muda com o ângulo (o P2 girado não é o mesmo quadro sem giro); o char gerado
+    # não tem sprites, então um retângulo faz as vezes do quadro
+    from PIL import Image
+    monkeypatch.setattr(simulate, "_frame_img",
+                        lambda char, f, palette=None: (Image.new("RGBA", (20, 60), (200, 50, 50, 255)), 10, 60))
+    rec = spun[3]
+    win = simulate.preview_tick_window(rec, simulate.preview_window(sim))
+    flat = dict(rec, p2=dict(rec["p2"], angle=0.0, scale=(1, 1)))
+    a = simulate.render_tick(sim, rec, win, zoom=1, boxes=False)
+    b = simulate.render_tick(sim, flat, win, zoom=1, boxes=False)
+    assert a.tobytes() != b.tobytes()
 
 
 def test_finite_changestate_loop_on_the_same_tick(tmp_path):
@@ -381,6 +415,42 @@ def test_chain_follows_the_cmd_triggers_and_recovery_frees_juggle(tmp_path):
         "[Statedef -1]", "", "[State -1, especial]", "type = ChangeState", "value = 9971",
         'triggerall = command = "x"', "trigger1 = StateNo = 9970", "trigger1 = Time > 2", ""]))
     assert simulate.cancel_targets(c, 9970)["defesa"] == {9971}
+
+
+def test_negative_states_run_every_tick_and_nojugglecheck(tmp_path):
+    """Issue 14 (Garuda): o [Statedef -2] roda todo tick antes do estado atual. O Garuda põe
+    o fvar(2) do dano e o AssertSpecial nojugglecheck no -2; sem rodar o -2 o 2º golpe saía com
+    dano 0 e, com airjuggle = 0, nem pegava. Com o modo (Var(2) > 0) o combo fecha."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_constant(c, "Data", "airjuggle", "0")
+    for n, end in ((9970, 12), (9971, 8)):
+        ops.set_statedef_text(c, n, "\n".join([
+            f"[Statedef {n}]", "type = S", "movetype = A", "physics = S", "anim = 9970", "ctrl = 0",
+            "juggle = 15", "",
+            f"[State {n}, hd]", "type = HitDef", "trigger1 = time = 0", "attr = S, NA",
+            "damage = floor(10 * fvar(2))", "pausetime = 0, 0", "ground.hittime = 5",
+            "ground.velocity = 0", "sparkno = -1", "",
+            f"[State {n}, fim]", "type = ChangeState", f"trigger1 = time >= {end}", "value = 0",
+            "ctrl = 1", ""]))
+    ops.set_statedef_text(c, -1, "\n".join([
+        "[Statedef -1]", "", "[State -1, golpe]", "type = ChangeState", "value = 9971",
+        'triggerall = command = "x"', "trigger1 = ctrl",
+        "trigger2 = Var(2) > 0", "trigger2 = MoveContact", "trigger2 = StateNo = 9970", ""]))
+    ops.set_statedef_text(c, -2, "\n".join([
+        "[Statedef -2]", "", "[State -2, dano]", "type = VarSet", "trigger1 = 1", "fvar(2) = 1.5",
+        "ignorehitpause = 1", "",
+        "[State -2, juggle]", "type = AssertSpecial", "trigger1 = var(2) > 0",
+        "flag = nojugglecheck", "ignorehitpause = 1", ""]))
+    sim = simulate.simulate(c, 9970, p2_dist=30, chain=(9970, 9971),
+                            start_vars=simulate.parse_start_vars("var(2)=150"))
+    r = simulate.chain_report(sim)
+    hits = [e for e in sim.events if e["kind"] == "acerto"]
+    assert [s["how"] for s in r["steps"]] == ["cancela"]
+    assert r["hits"] == 2 and r["combo"] == 2 and [e["damage"] for e in hits] == [15, 15]
+    assert not any("juggle" in n for n in sim.unsupported)
+    # o que o -2 faz não entra na linha do tempo do golpe
+    assert all(e["state"] == -2 for e in sim.events if e.get("value") == "assertspecial")
 
 
 def _hit_char(tmp_path):
@@ -882,3 +952,274 @@ def test_helper_screenbound(tmp_path):
     sim = simulate.Sim(c, 9970, p2_dist=30, max_ticks=40).run(until_idle=False)
     held, free = (next(h for h in sim.helpers if h.helper_id == i) for i in (1, 2))
     assert held.pos[0] <= sim.xmax + 1e-6 < free.pos[0]
+
+
+def test_attr_triggers_and_hitby_slots_like_ikemen(tmp_path):
+    """HitDefAttr/HitByAttr/ReversalDefAttr como o Ikemen 1.0: HitDefAttr só atacando (MoveType
+    A), com o tipo de estado e o de golpe; com redirecionamento o boneco nunca ataca. HitBy e
+    NotHitBy guardam slots com tempo (padrão 1 tick)."""
+    from charfactory.tools import simexpr, simulate
+    c = _hit_char(tmp_path)
+    sim = simulate.Sim(c, 0, p2_dist=40)
+    p1 = sim.p1
+    ev = lambda e: simexpr.evaluate(e, p1)                     # noqa: E731
+    assert ev("hitdefattr = SCA, AA") == 0                     # sem HitDef
+    p1.movetype, p1.hitdef, p1.hitdef_hit = "A", {"params": {"attr": "S, NA"}}, False
+    assert ev("hitdefattr = SCA, AA") == 1 and ev("hitdefattr = S, AT") == 0
+    assert ev("hitdefattr != C, NA") == 1 and ev("hitdefattr = SCA, NA, SP && 1") == 1
+    assert ev("!(enemynear, HitDefAttr = SCA, AT, AP, AA)") == 1
+    assert ev("hitbyattr(SCA, AA)") == 1 and ev("enemynear, hitbyattr(S, NA)") == 1
+    p1.hitby = [{"not": True, "attr": simexpr.parse_attr("SCA, AA"), "time": 5, "stack": False}, None]
+    # NotHitBy barra quando o tipo de estado OU o de golpe batem (checkHitBySlot)
+    assert ev("hitbyattr(S, NA)") == 0 and ev("hitbyattr(S, SP)") == 0
+    p1.reversal_attr = "SA, AA"
+    assert ev("reversaldefattr = SCA, NA") == 1 and ev("reversaldefattr = C, AT") == 0
+
+
+def test_system_and_previous_state_triggers(tmp_path):
+    """Gatilhos de partida, de tempo e do estado anterior (Ikemen 1.0) numa luta simulada: um
+    contra um, 1º round; AnimElem != n vale como = n (IgnoreMostErrors)."""
+    from charfactory.tools import ops, simexpr, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = C\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 5\nvalue = 9971\n"))
+    ops.set_statedef_text(c, 9971, "[Statedef 9971]\ntype = S\nmovetype = I\nphysics = S\nanim = 0\n")
+    sim = simulate.simulate(c, 9970, p2_dist=40, max_ticks=10)
+    p1 = sim.p1
+    ev = lambda e: simexpr.evaluate(e, p1)                     # noqa: E731
+    assert ev("prevstatetype = C") == 1 and ev("prevmovetype = A") == 1 and ev("prevanim") == 9970
+    assert ev("numpartner") == 0 and ev("matchno") == 1 and ev("drawgame") == 0
+    assert ev("ishometeam") == 1 and ev("enemynear, ishometeam") == 0
+    assert ev("timeremaining") == simulate.ROUND_TICKS - sim.tick and ev("roundtime") == sim.tick
+    assert ev("attack") == 100 and ev("defence") == 100 and ev("camerazoom") == 1
+    assert ev("round(2.456, 1)") == 2.5 and ev("lerp(0, 10, 2)") == 10 and ev("deg(pi)") == 180
+    assert ev("const720p(4)") == 1 and ev("ikemenversion(major)") == 0
+    assert ev("enemynear, numhelper") == 0 and ev("enemynear, teammode = single") == 1
+    assert simexpr.compile_expr("animelem != 6") == simexpr.compile_expr("animelem = 6")
+
+
+def test_ikemen_maps_points_and_forced_commands(tmp_path):
+    """MapSet/MapAdd e o gatilho Map, RootVarSet do helper, RedLifeAdd, MoveHitReset e
+    AssertCommand (o comando vale por buffertime ticks), como o Ikemen 1.0."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 0\nctrl = 0\n\n"
+        "[State 9970, m]\ntype = MapSet\ntrigger1 = time = 0\nmap(combo) = 3\n\n"
+        "[State 9970, m2]\ntype = MapAdd\ntrigger1 = time = 1\nmap = \"combo\"\nvalue = 2\n\n"
+        "[State 9970, v]\ntype = VarSet\ntrigger1 = time = 2\nvar(5) = map(combo)\n\n"
+        "[State 9970, rl]\ntype = RedLifeAdd\ntrigger1 = time = 2\nvalue = -100\n\n"
+        "[State 9970, cmd]\ntype = AssertCommand\ntrigger1 = time = 3\nname = \"zz\"\nbuffertime = 2\n\n"
+        "[State 9970, viu]\ntype = VarAdd\ntrigger1 = command = \"zz\"\nvar(6) = 1\n\n"
+        "[State 9970, h]\ntype = Helper\ntrigger1 = time = 0\nstateno = 9972\nid = 1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 8\nvalue = 0\nctrl = 1\n"))
+    ops.set_statedef_text(c, 9972, (
+        "[Statedef 9972]\ntype = S\nmovetype = I\nphysics = N\nanim = 0\n\n"
+        "[State 9972, r]\ntype = RootVarSet\ntrigger1 = time = 1\nvar(7) = 42\n\n"
+        "[State 9972, fim]\ntype = DestroySelf\ntrigger1 = time >= 2\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=40, max_ticks=8)
+    p1 = sim.p1
+    assert p1.maps["combo"] == 5 and p1.vars[5] == 5 and p1.vars[7] == 42
+    assert p1.points["redlife"] == 900 and p1.trigger("redlife", None) == 900
+    assert p1.vars[6] == 2                                    # o comando valeu 2 ticks
+    assert not any("not simulated" in n or "não simulado" in n for n in sim.unsupported)
+
+
+_ONE_HIT = __import__("itertools").count()
+
+
+def _one_hit(tmp_path, extra: str, p2_dist=30, **kw):
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path / f"c{next(_ONE_HIT)}")
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, hd]\ntype = HitDef\ntrigger1 = time = 0\n" + extra + "\nsparkno = -1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 40\nvalue = 0\nctrl = 1\n"))
+    return c, simulate.simulate(c, 9970, p2_dist=p2_dist, max_ticks=80, **kw)
+
+
+def test_hit_damage_power_and_kill_like_ikemen(tmp_path):
+    """Dano e energia como o Ikemen 1.0: energia = dano x LifeToPowerMul truncada (0,7 / 0,6;
+    golpe de super dá 0 a quem bate), kill = 0 deixa 1 de vida, golpe sem tipo de golpe no attr
+    não acerta e o tipo None conta como contato sem o P2 apanhar."""
+    _, sim = _one_hit(tmp_path, "attr = S, NA\ndamage = 15\npausetime = 2, 2")
+    h = next(e for e in sim.events if e["kind"] == "acerto")
+    assert (h["dealt"], h["p1power"], h["p2power"]) == (15, 10, 9)     # 10.5 e 9.0 truncados
+    _, sim = _one_hit(tmp_path, "attr = S, HA\ndamage = 15\npausetime = 2, 2")
+    h = next(e for e in sim.events if e["kind"] == "acerto")
+    assert (h["p1power"], h["p2power"]) == (0, 9)
+    _, sim = _one_hit(tmp_path, "attr = S, NA\ndamage = 5000\nkill = 0\npausetime = 2, 2")
+    assert sim.p2.life == 1
+    _, sim = _one_hit(tmp_path, "attr = S\ndamage = 50\npausetime = 2, 2")
+    assert not [e for e in sim.events if e["kind"] in ("acerto", "contato")]
+    _, sim = _one_hit(tmp_path, "attr = S, NA\ndamage = 50\nground.type = none\npausetime = 9, 9")
+    assert [e["kind"] for e in sim.events if e["kind"] in ("acerto", "contato")] == ["contato"]
+    assert sim.p2.life == 1000 and all(r["p2"]["state"] == "stand" for r in sim.track)
+
+
+def test_throw_unhittable_snap_and_down_hit(tmp_path):
+    """Arremesso deixa o P2 intocável por pausetime + 1 (o 2º HitDef não pega nesse tempo); snap
+    põe o P2 à distância pedida; o P2 deitado que apanha treme (5080), desliza (5081) e volta a
+    deitar, sem levantar como quem estava em pé."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, t]\ntype = HitDef\ntrigger1 = time = 0\nattr = S, NT\npausetime = 0, 0\n"
+        "ground.hittime = 30\nsnap = 40, 0\nunhittabletime = 0, 10\nsparkno = -1\n\n"
+        "[State 9970, de novo]\ntype = HitDef\ntrigger1 = time = 2 || time = 14\nattr = S, NA\n"
+        "pausetime = 0, 0\nsparkno = -1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 30\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=30, max_ticks=40)
+    hits = [e for e in sim.events if e["kind"] == "acerto"]
+    # o 2º HitDef (time = 2) fica armado e só pega quando o unhittabletime acaba (tick 10)
+    assert [h["t"] for h in hits] == [0, 10, 14]
+    # o snap entra no tick seguinte ao acerto (Ikemen: ghv.xoff no update)
+    p1x = sim.track[1]["ents"][0]["pos"][0]
+    assert sim.track[0]["p2"]["pos"][0] != p1x + 40 and sim.track[1]["p2"]["pos"][0] == p1x + 40
+    # P2 deitado: fall = 1 derruba, o 2º golpe pega no chão; deitado ele ainda tem o fallflag
+    # (Ikemen hittmp = 2), então o hitflag precisa de D e de F
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, cai]\ntype = HitDef\ntrigger1 = time = 0\nattr = S, NA\npausetime = 0, 0\n"
+        "fall = 1\nground.velocity = 0, -2\nsparkno = -1\n\n"
+        "[State 9970, no chão]\ntype = HitDef\ntrigger1 = p2stateno = 5110\nattr = S, NA\n"
+        "hitflag = DF\npausetime = 0, 4\ndown.hittime = 6\ndown.velocity = -3, 0\nsparkno = -1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 150\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=30, max_ticks=150)
+    hits = [e for e in sim.events if e["kind"] == "acerto"]
+    assert len(hits) >= 2                                     # rearma a cada volta ao 5110
+    after = [r["p2"]["sub"] for r in sim.track if hits[1]["t"] < r["t"] < hits[2]["t"]] if len(hits) > 2         else [r["p2"]["sub"] for r in sim.track if r["t"] > hits[1]["t"]]
+    assert "lhit" in after and "lslide" in after
+    assert after.index("lie") > after.index("lslide")         # volta a deitar depois do HitOver
+
+
+def test_ko_falls_stays_down_and_pause_hit_moves(tmp_path):
+    """KO como o Ikemen: o golpe que zera a vida derruba o P2 (fallflag) com a velocidade extra
+    do kovelocity e ele não levanta. Quem apanha durante a SuperPause anda pelo tempo do tremor
+    (superMovetime) enquanto o resto segue parado."""
+    _, sim = _one_hit(tmp_path, "attr = S, NA\ndamage = 5000\npausetime = 0, 4\nground.velocity = -4")
+    h = next(e for e in sim.events if e["kind"] == "acerto")
+    assert sim.p2.life == 0 and h["fall"]
+    subs = [r["p2"]["sub"] for r in sim.track]
+    assert "lie" in subs and "getup" not in subs
+    _, sim = _one_hit(tmp_path, "attr = S, NA\ndamage = 10\npausetime = 0, 6\nground.velocity = -4\n"
+                      "\n[State 9970, sp]\ntype = SuperPause\ntrigger1 = time = 0\ntime = 20")
+    shake = [r["p2"]["shake"] for r in sim.track[:12]]
+    assert all(r["pause"] for r in sim.track[:12])
+    assert shake[:7] == [6, 5, 4, 3, 2, 1, 0] and shake[11] == 0   # anda os 6 ticks do tremor
+
+
+def test_override_and_transform_clsn(tmp_path):
+    """OverrideClsn troca/apaga/acrescenta caixas no tick em que roda e TransformClsn escala e
+    gira a Clsn1 (colisão de retângulos girados, Ikemen RectIntersect)."""
+    from charfactory.tools import simulate
+    # a caixa (0,-60,40,0) girada 90° em volta do pé vira (−60..0 em x); longe do P2 à frente
+    assert simulate.rects_overlap((0, -60, 40, 0), (0, 0), 0.0, (30, -50, 40, -10), (0, 0), 0.0)
+    assert not simulate.rects_overlap((0, -60, 40, 0), (0, 0), simulate.math.radians(90),
+                                      (30, -50, 40, -10), (0, 0), 0.0)
+    _, sim = _one_hit(tmp_path, "attr = S, NA\npausetime = 0, 0\n\n[State 9970, sem]\n"
+                      "type = OverrideClsn\ntrigger1 = 1\ngroup = 1\nindex = -1\nrect = 0, 0, 0, 0")
+    assert not [e for e in sim.events if e["kind"] == "acerto"]          # sem Clsn1: não pega
+    _, sim = _one_hit(tmp_path, "attr = S, NA\npausetime = 0, 0\n\n[State 9970, longe]\n"
+                      "type = OverrideClsn\ntrigger1 = 1\ngroup = 1\nindex = 0\nrect = 200, -60, 240, 0")
+    assert not [e for e in sim.events if e["kind"] == "acerto"]
+    _, sim = _one_hit(tmp_path, "attr = S, NA\npausetime = 0, 0\n\n[State 9970, grande]\n"
+                      "type = TransformClsn\ntrigger1 = 1\nscale = 1, 1", p2_dist=40)
+    assert [e for e in sim.events if e["kind"] == "acerto"]
+
+
+def test_ikemen_read_triggers(tmp_path):
+    """Gatilhos de leitura do Ikemen 1.0 pelo estado da simulação: ExplodVar, AnimElemVar,
+    ClsnVar, ClsnOverlap, PalFXVar e MoveHitVar."""
+    from charfactory.tools import ops, simexpr, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, e]\ntype = Explod\ntrigger1 = time = 0\nanim = 9970\nid = 77\npos = 10, -20\n"
+        "removetime = 30\n\n"
+        "[State 9970, pal]\ntype = PalFX\ntrigger1 = time = 0\ntime = 20\nadd = 30, 0, 0\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 40\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=30, max_ticks=3)
+    ev = lambda e: simexpr.evaluate(e, sim.p1)                 # noqa: E731
+    assert ev("explodvar(77, 0, id)") == 77 and ev("explodvar(77, 0, removetime)") == 30
+    assert ev("explodvar(77, 1, id)") == 0                    # índice fora da lista
+    assert ev("animelemvar(numclsn1)") == 1
+    assert ev("clsnvar(clsn1, 0, front)") == 40 and ev("clsnvar(clsn1, 0, top)") == -60
+    assert ev("clsnoverlap(clsn1, 57, clsn2)") == 1
+    assert ev("palfxvar(add.r)") == 30 and ev("palfxvar(time)") > 0
+    assert ev("movehitvar(frame)") == 0 and ev("localcoord x") == 320
+
+
+def test_undefined_values_like_ikemen(tmp_path):
+    """Valor indefinido do Ikemen 1.0: redirecionamento sem alvo, divisão por zero. Vale 0 nas
+    contas e comparações, é falso no fim e o `!` e a faixa o preservam (!indefinido é falso)."""
+    from charfactory.tools import ops, simexpr, simulate
+    c = _hit_char(tmp_path)
+    sim = simulate.Sim(c, 0, p2_dist=40)
+    ev = lambda e: simexpr.evaluate(e, sim.p1)                 # noqa: E731
+    assert simexpr.is_undef(ev("partner, life")) and not ev("partner, life")
+    assert ev("partner, life = 0") == 1                       # compara como 0
+    assert simexpr.is_undef(ev("!(partner, life)")) and not ev("!(partner, life)")
+    assert simexpr.is_undef(ev("1 / 0")) and ev("(1 / 0) + 2") == 2
+    assert simexpr.is_undef(ev("partner, life = [0, 10]"))
+    # AnimElem >= 3 vale como AnimElem = 3 (checkEquality com IgnoreMostErrors)
+    assert simexpr.compile_expr("animelem >= 3") == simexpr.compile_expr("animelem = 3")
+    # helper de leitura (Helper(id) que o golpe não cria) cujo estado lê ele mesmo
+    ops.set_statedef_text(c, 9980, (
+        "[Statedef 9980]\ntype = S\nmovetype = I\nphysics = N\nanim = 0\n\n"
+        "[State 9980, v]\ntype = VarSet\ntrigger1 = helper(9980), time = 0\nvar(3) = 7\n"))
+    sim = simulate.Sim(c, 0, p2_dist=40)
+    assert simexpr.evaluate("helper(9980), var(3)", sim.p1) == 7
+
+
+def test_dizzy_and_guard_break_like_ikemen(tmp_path):
+    """dizzy.zss/guardbreak.zss do Ikemen 1.0 (ligados no common.const): cada acerto tira
+    1,8 x dano de tontura; ao zerar o P2 é lançado, cai, levanta e fica tonto (6565300, MoveType
+    I) por 180 ticks. Na defesa cada golpe tira 1,5 x dano de guarda; ao zerar, quebra a guarda
+    (6565400/6565401) e o P2 fica atordoado."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, hd]\ntype = HitDef\ntrigger1 = time % 6 = 0 && time < 60\nattr = S, NA\n"
+        "damage = 60\npausetime = 0, 0\nground.hittime = 10\nground.velocity = 0\nsparkno = -1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 400\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=30, max_ticks=420)
+    states = [r["p2"]["state"] for r in sim.track]
+    assert "dizzy" in states
+    i = states.index("dizzy")
+    assert states[i:i + 180].count("dizzy") == 180 and states[i + 181] == "stand"
+    # defesa: 150 de guarda por golpe (100 x 1,5); o 7º zera e quebra a guarda
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = A\nphysics = S\nanim = 9970\nctrl = 0\n\n"
+        "[State 9970, hd]\ntype = HitDef\ntrigger1 = time % 8 = 0 && time < 80\nattr = S, NA\n"
+        "damage = 100, 1\nguardflag = MA\npausetime = 0, 0\nground.hittime = 6\nsparkno = -1\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 200\nvalue = 0\nctrl = 1\n"))
+    sim = simulate.simulate(c, 9970, p2_dist=30, max_ticks=220, p2_guard=True)
+    guards = [e for e in sim.events if e["kind"] == "defesa"]
+    states = [r["p2"]["state"] for r in sim.track]
+    assert len(guards) >= 7 and "gbreak" in states
+
+
+def test_negative_states_order_and_helper_keyctrl(tmp_path):
+    """Ikemen actionRun: o jogador roda -3, -2 e -1 (o -1 inteiro, não só os ChangeState de
+    comando) antes do estado; o helper só roda o -1/-2/-3 do keyctrl. VarRandom com a faixa
+    invertida e ChangeAnim com elem numa anim sem quadros não travam."""
+    from charfactory.tools import ops, simulate
+    c = _hit_char(tmp_path)
+    ops.set_statedef_text(c, -1, "[Statedef -1]\n\n[State -1, conta]\ntype = VarAdd\ntrigger1 = 1\nvar(10) = 1\n")
+    ops.set_statedef_text(c, 9970, (
+        "[Statedef 9970]\ntype = S\nmovetype = I\nphysics = S\nanim = 0\nctrl = 0\n\n"
+        "[State 9970, h1]\ntype = Helper\ntrigger1 = time = 0\nstateno = 9972\nid = 1\nkeyctrl = 1\n\n"
+        "[State 9970, h2]\ntype = Helper\ntrigger1 = time = 0\nstateno = 9972\nid = 2\n\n"
+        "[State 9970, r]\ntype = VarRandom\ntrigger1 = time = 0\nv = 3\nrange = 10, 5\n\n"
+        "[State 9970, a]\ntype = ChangeAnim\ntrigger1 = time = 1\nvalue = 4321\nelem = 3\n\n"
+        "[State 9970, fim]\ntype = ChangeState\ntrigger1 = time >= 5\nvalue = 0\nctrl = 1\n"))
+    ops.set_statedef_text(c, 9972, "[Statedef 9972]\ntype = S\nmovetype = I\nphysics = N\nanim = 0\n")
+    sim = simulate.simulate(c, 9970, p2_dist=40, max_ticks=5)
+    assert sim.p1.vars[10] == len(sim.track)                  # o -1 rodou em todo tick
+    h1, h2 = (h for h in sim.helpers if h.alive)
+    assert h1.vars.get(10, 0) > 0 and h2.vars.get(10, 0) == 0   # só o keyctrl = 1 roda o -1
+    assert 5 <= sim.p1.vars[3] <= 10
