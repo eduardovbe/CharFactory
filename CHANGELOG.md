@@ -7,26 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
 ### Added
 
-- AI assistant: answers appear as they are written (Claude and OpenAI).
+- Simulator: starting variables to test a character's modes.
+- AI assistant: answers appear as they are written.
 - AI assistant: token count and estimated cost of the conversation.
 - AI assistant: suggestions based on the open character.
-- AI assistant: reasoning level and a smaller tool set for local models in AI settings.
+- AI assistant: reasoning level and a lighter mode for local models.
 - AI assistant: Continue button when an answer runs out of steps.
-- AI assistant: names the animations by looking at them.
-- AI assistant: reviews a finished move frame by frame (`review_move`).
-- AI assistant: builds projectiles, throws, supers and moves in phases from a spec (`build_spec_move`).
-- AI assistant: knows the character from the start (`character_brief`).
+- AI assistant: names animations by looking at them.
+- AI assistant: reviews a finished move frame by frame.
+- AI assistant: builds projectiles, throws and supers in phases.
+- AI assistant: knows the open character from the start.
 - AI assistant: notes per character and the last conversation can be reopened.
 - AI assistant: rate answers and save them as test cases.
-- `tools/ai_eval.py` to measure the assistant, with recorded runs that replay offline and a Claude Code (MCP) mode.
 
 ### Changed
 
-- AI assistant: old tool results are trimmed in long conversations.
-- AI assistant: strong models get goals instead of a step-by-step recipe.
-- Long tool results come in parts instead of being cut.
+- Simulator: works like Ikemen GO 1.0, with every trigger and state controller.
+- Simulator: hits, throws, knockdowns and KOs behave like in the game.
+- Simulator: the opponent can get dizzy and have its guard broken.
+- AI assistant: long conversations stay lighter.
+
+### Fixed
+
+- Simulator: combos that rely on a character's own systems now connect (#14).
+- Simulator: throws rotate and layer the opponent like in the game (#15).
+- Simulator: combo chains follow cancels and juggle resets.
+- Simulator: disabled moves no longer show in the state list.
+- Simulator: fixed crashes with some characters.
 
 ## [0.5.5] - 2026-11-18
 
@@ -389,7 +400,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tick-by-tick move simulator, stage editor, tools and the `charfactory` command line.
 - Interface in English, Spanish and Brazilian Portuguese.
 
-[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/eduardovbe/CharFactory/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/eduardovbe/CharFactory/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/eduardovbe/CharFactory/compare/v0.5.1...v0.5.5
 [0.5.1]: https://github.com/eduardovbe/CharFactory/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/eduardovbe/CharFactory/compare/v0.4.6...v0.5.0
